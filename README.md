@@ -11,10 +11,15 @@ Double-click the portable EXE and it silently starts the `pi-web` command you al
 - **Portable single EXE** — no installer, no setup; run it from any folder.
 - **No console window** — `pi-web` runs hidden and its output goes to a log file.
 - **Reuses or owns the service** — if a healthy Pi Web already listens on the default port it is reused; otherwise Pi Web Box starts its own process tree and stops it on exit.
-- **High-contrast icons** — the portable EXE, taskbar, and desktop shortcut use a dark tile with a white Pi, visible in both light and dark Windows themes.
+- **High-contrast icons** — the EXE, taskbar, tray, and desktop shortcut use a dark tile with a white Pi, visible in both light and dark Windows themes.
 - **Startup page** — shows the current step, a progress bar, and live npm/pnpm output instead of a terminal.
 - **Update check** — queries npm for `@earendil-works/pi-coding-agent` and `@agegr/pi-web` on every launch and offers to update them.
-- **Version panel** — a floating button in the bottom-right corner of the page shows the Pi, Pi Web, and Pi Web Box versions and links to their websites.
+- **About panel** — the floating button in the bottom-right corner shows the Pi, Pi Web, and Pi Web Box versions, links each one to its website, and opens the Box settings window.
+- **Automatic title bar theming** — Windows paints the native title bar with the current Pi Web theme background, so the frame blends into the page. Pi Web has five themes (Light, Dark, Mist, Rose, Pine); switching between them updates the title bar automatically.
+- **Box settings** — a settings window styled like Pi Web's own settings, split into **Appearance & behavior** and **Pi Web configuration**.
+- **Minimize to tray** — closing the window keeps Pi Web running in the notification area by default; it can be turned off in the settings.
+- **Pi Web launch options** — configure port, hostname, allowed hosts, password, and the `pi-web` / Node.js paths from the settings window, then restart to apply them.
+- **Config reset** — the startup page has a reset button that restores all Box settings and the launch command to automatic detection.
 - **External links** — features that open a new tab (for example "Full history") are handed to your default browser.
 - **Errors in the window** — failures are rendered inside the app with an "Open log" button.
 
@@ -61,16 +66,17 @@ The app listens on `127.0.0.1` only and never exposes the service to the local n
 npm install
 npm run typecheck
 npm run dev      # build and run from source
-npm run dist     # build the installer and the portable EXE into dist/
+npm run dist     # build the installer into dist/
 ```
 
 `npm run dist` explicitly downloads Electron from `https://npmmirror.com/mirrors/electron/`, so an outdated global npm mirror configuration cannot break packaging.
 
-To build only one target:
+Other targets are available when needed:
 
 ```powershell
 npm run dist:nsis        # installer only
 npm run dist:portable    # portable only
+npm run dist:both        # installer and portable together
 ```
 
 > Close any running Pi Web Box before packaging. Windows locks a running EXE, which makes the build stall at `building target=` without an error.
@@ -87,7 +93,20 @@ Environment variables, all optional:
 | `PI_WEB_BOX_REGISTRY` | npm registry used for version checks and updates | `https://registry.npmjs.org` |
 | `PI_WEB_BOX_SKIP_UPDATE_CHECK` | Set to `1` to skip the update check | Unset |
 
-Logs are written to `%APPDATA%/Pi Web Box/logs/pi-web.log`.
+These variables only seed the initial settings file. After the first launch, Box settings are stored in `%APPDATA%/Pi Web Box/settings.json` and can be edited from the app. Logs are written to `%APPDATA%/Pi Web Box/logs/pi-web.log`.
+
+### Pi Web launch options
+
+The following Pi Web options are available in **Box settings → Pi Web configuration**:
+
+| Option | Purpose |
+| --- | --- |
+| Port | `--port`, default `30141` |
+| Hostname | `--hostname`, default `127.0.0.1` (local only) |
+| Allowed hosts | `PI_WEB_ALLOWED_HOSTS` for reverse proxies or custom domains |
+| Password | `PI_WEB_PASSWORD`, enables authentication |
+| `pi-web` path | Absolute path to `pi-web.cmd`, empty means auto-detect |
+| Node.js path | Absolute path to `node.exe`, empty means auto-detect |
 
 ## Notes
 

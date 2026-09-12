@@ -50,10 +50,9 @@ async function canConnect(port: number): Promise<boolean> {
   });
 }
 
-async function readPiWebPage(port: number): Promise<boolean> {
+async function readPiWebPage(port: number, password?: string): Promise<boolean> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
-  const password = process.env.PI_WEB_PASSWORD;
   const headers = password ? { Authorization: `Basic ${Buffer.from(`pi:${password}`).toString("base64")}` } : undefined;
   try {
     const response = await fetch(`http://127.0.0.1:${port}/`, { signal: controller.signal, redirect: "manual", headers });
@@ -66,18 +65,19 @@ async function readPiWebPage(port: number): Promise<boolean> {
   }
 }
 
-async function findCommand(): Promise<string> {
-  const override = process.env.PI_WEB_BOX_COMMAND?.trim();
+async function findCommand(env: Record<string, string | undefined> = process.env): Promise<string> {
+  // Box 设置里指定的路径优先，其次是环境变量覆盖，最后才从 PATH 探测。
+  const override = env.PI_WEB_BOX_COMMAND?.trim();
   if (override) {
-    if (!path.isAbsolute(override)) throw new Error("PI_WEB_BOX_COMMAND 必须是 pi-web.cmd 的绝对路径。");
-    if (!fs.existsSync(override)) throw new Error(`PI_WEB_BOX_COMMAND 指向的文件不存在：${override}`);
+    if (!path.isAbsolute(override)) throw new Error("pi-web 命令路径必须是 pi-web.cmd 的绝对路径。");
+    if (!fs.existsSync(override)) throw new Error(`指定的 pi-web 命令不存在：${override}`);
     return override;
   }
 
   const candidates: string[] = [];
-  const npmGlobal = process.env.NPM_CONFIG_PREFIX;
-  const localAppData = process.env.LOCALAPPDATA;
-  const appData = process.env.APPDATA;
+  const npmGlobal = env.NPM_CONFIG_PREFIX;
+  const localAppData = env.LOCALAPPDATA;
+  const appData = env.APPDATA;
   if (npmGlobal) candidates.push(path.join(npmGlobal, "pi-web.cmd"));
   if (localAppData) candidates.push(path.join(localAppData, "npm-global", "pi-web.cmd"));
   if (appData) candidates.push(path.join(appData, "npm", "pi-web.cmd"));
@@ -90,14 +90,14 @@ async function findCommand(): Promise<string> {
   for (const candidate of candidates) {
     if (!path.isAbsolute(candidate) || fs.existsSync(candidate)) return candidate;
   }
-  throw new Error("找不到 pi-web 命令。请先执行 npm install -g @agegr/pi-web@latest，或设置 PI_WEB_BOX_COMMAND 指向 pi-web.cmd。");
+  throw new Error("找不到 pi-web 命令。请先执行 npm install -g @agegr/pi-web@latest，或在 Box 设置里指定 pi-web 命令路径。");
 }
 
-async function findNodeExecutable(): Promise<string> {
-  const override = process.env.PI_WEB_BOX_NODE?.trim();
+async function findNodeExecutable(env: Record<string, string | undefined> = process.env): Promise<string> {
+  const override = env.PI_WEB_BOX_NODE?.trim();
   if (override) {
     if (!path.isAbsolute(override) || !fs.existsSync(override)) {
-      throw new Error(`PI_WEB_BOX_NODE 指向的 Node.js 不存在：${override}`);
+      throw new Error(`指定的 Node.js 不存在：${override}`);
     }
     return override;
   }
@@ -132,6 +132,8 @@ export class PiWebProcessManager {
     private readonly logPath: string,
     private readonly log: (message: string) => void = () => {},
     private readonly onUnexpectedExit?: (error: Error) => void,
+    /** Box 设置里的 pi-web 配置，会覆盖到子进程环境变量上。 */
+    private readonly settingsEnvironment: Record<string, string> = {},
   ) {
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
     this.logStream = fs.createWriteStream(logPath, { flags: "a" });
@@ -146,25 +148,30 @@ export class PiWebProcessManager {
   }
 
   async start(): Promise<PiWebStartResult> {
-    const preferred = parsePort(process.env.PI_WEB_BOX_PORT?.trim() || String(DEFAULT_PORT));
-    if (await readPiWebPage(preferred)) {
+    // 端口优先级：Box 设置 > 环境变量 > 内置默认值。
+    const configuredPort = this.settingsEnvironment.PORT?.trim() || process.env.PI_WEB_BOX_PORT?.trim();
+    const preferred = parsePort(configuredPort || String(DEFAULT_PORT));
+    if (await readPiWebPage(preferred, this.settingsEnvironment.PI_WEB_PASSWORD)) {
       this.writeLog(`Reusing healthy Pi Web at port ${preferred}.`);
       return { url: `http://127.0.0.1:${preferred}`, owned: false, port: preferred };
     }
 
     const port = await canConnect(preferred) ? await getFreePort() : preferred;
-    const command = await findCommand();
+    // 合并 Box 设置与环境变量，探测命令、Node 与健康检查都用同一份配置。
+    const env = { ...process.env, ...this.settingsEnvironment };
+    const command = await findCommand(env);
     const entry = resolvePiWebEntry(command);
     if (!fs.existsSync(entry)) {
       throw new Error(`找到了 pi-web 命令，但缺少 npm 包入口：${entry}。请重新执行 npm install -g @agegr/pi-web@latest。`);
     }
-    const node = await findNodeExecutable();
-    const args = [entry, "--hostname", "127.0.0.1", "--port", String(port), "--no-open"];
+    const node = await findNodeExecutable(env);
+    const hostname = env.PI_WEB_HOSTNAME || "127.0.0.1";
+    const args = [entry, "--hostname", hostname, "--port", String(port), "--no-open"];
     this.writeLog(`Starting ${node} ${args.join(" ")} on port ${port}.`);
 
     this.child = spawn(node, args, {
       cwd: os.homedir(),
-      env: { ...process.env, PI_WEB_NO_OPEN: "1" },
+      env: { ...env, PI_WEB_NO_OPEN: "1" },
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -183,7 +190,7 @@ export class PiWebProcessManager {
 
     const deadline = Date.now() + START_TIMEOUT_MS;
     while (Date.now() < deadline) {
-      if (await readPiWebPage(port)) {
+      if (await readPiWebPage(port, env.PI_WEB_PASSWORD)) {
         this.ready = true;
         this.writeLog(`Pi Web is ready at port ${port}.`);
         return { url: `http://127.0.0.1:${port}`, owned: true, port };

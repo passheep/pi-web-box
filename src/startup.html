@@ -17,12 +17,21 @@
     .progress.indeterminate .progress-bar { animation: progress 1.2s ease-in-out infinite; }
     pre { width: min(520px, 100%); max-height: 180px; box-sizing: border-box; margin: 18px auto 0; padding: 12px; overflow: auto; border: 1px solid #e2e5e9; border-radius: 8px; background: #fff; color: #4b5563; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.55 Consolas, monospace; }
     pre[hidden] { display: none; }
+    .actions { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 18px; }
+    button { border: 1px solid transparent; border-radius: 7px; padding: 7px 13px; font: inherit; font-size: 13px; cursor: pointer; background: #202124; color: #fff; }
+    button:hover { filter: brightness(1.1); }
+    button:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+    button.secondary { background: transparent; border-color: #d4d4d8; color: #4b5563; }
+    .hint { font-size: 12px; color: #68707b; }
     @media (prefers-color-scheme: dark) {
       :root { color: #f4f4f5; background: #18181b; }
       p { color: #a1a1aa; }
       .progress { background: #3f3f46; }
       .progress-bar { background: #fafafa; }
       pre { border-color: #3f3f46; background: #27272a; color: #d4d4d8; }
+      button { background: #fafafa; color: #18181b; }
+      button.secondary { background: transparent; border-color: #3f3f46; color: #d4d4d8; }
+      .hint { color: #a1a1aa; }
     }
     @keyframes progress {
       0% { transform: translateX(-110%); }
@@ -42,6 +51,11 @@
     <div id="progress-bar" class="progress-bar"></div>
   </div>
   <pre id="detail" hidden></pre>
+  <div class="actions">
+    <button type="button" id="retry" hidden>重试</button>
+    <button type="button" id="reset" class="secondary">重置配置</button>
+    <span id="reset-hint" class="hint"></span>
+  </div>
 </main>
 <script src="./startup-renderer.js"></script>
 </body>

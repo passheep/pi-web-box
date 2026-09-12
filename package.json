@@ -1,7 +1,7 @@
 {
   "name": "pi-web-box",
   "productName": "Pi Web Box",
-  "version": "0.4.4",
+  "version": "0.5.0",
   "private": true,
   "description": "A quiet Windows desktop window for Pi Web",
   "author": "Pi Web Box",
@@ -14,9 +14,10 @@
     "test": "node --import tsx --test test/*.test.ts",
     "start": "npm run build && electron .",
     "dev": "npm run build && electron .",
-    "dist": "npm run build && electron-builder --win portable nsis --publish never",
+    "dist": "npm run build && electron-builder --win nsis --publish never",
     "dist:portable": "npm run build && electron-builder --win portable --publish never",
     "dist:nsis": "npm run build && electron-builder --win nsis --publish never",
+    "dist:both": "npm run build && electron-builder --win portable nsis --publish never",
     "dist:dir": "npm run build && electron-builder --win dir --publish never"
   },
   "devDependencies": {
