@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self';">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Pi Web Box - 启动失败</title>
+  <style>
+    :root { color-scheme: light dark; font-family: "Segoe UI", system-ui, sans-serif; color: #202124; background: #f7f8fa; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; }
+    main { width: min(560px, calc(100vw - 56px)); }
+    .card { background: white; border: 1px solid #e2e5e9; border-radius: 16px; padding: 30px; box-shadow: 0 8px 32px #1b1d210d; }
+    .logo { width: 52px; height: 52px; margin-bottom: 18px; }
+    h1 { font-size: 23px; margin: 0 0 10px; }
+    p { color: #68707b; line-height: 1.6; font-size: 14px; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f3f5f7; padding: 12px; border-radius: 8px; color: #4b5563; font-size: 12px; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+    button { border: 0; border-radius: 8px; padding: 9px 14px; font: inherit; cursor: pointer; background: #202124; color: white; }
+    button.secondary { background: #eef0f2; color: #30343b; }
+    .hint { margin-top: 18px; font-size: 13px; }
+    code { background: #eef0f2; padding: 2px 5px; border-radius: 4px; }
+    @media (prefers-color-scheme: dark) {
+      :root { color: #f4f4f5; background: #18181b; }
+      .card { background: #27272a; border-color: #3f3f46; box-shadow: 0 8px 32px #00000040; }
+      p { color: #a1a1aa; }
+      pre { background: #18181b; color: #d4d4d8; }
+      button { background: #fafafa; color: #18181b; }
+      button.secondary, code { background: #3f3f46; color: #f4f4f5; }
+    }
+  </style>
+</head>
+<body><main><section class="card">
+  <picture>
+    <source srcset="../assets/pi-logo-on-dark.svg" media="(prefers-color-scheme: dark)" />
+    <img class="logo" src="../assets/pi-logo-on-light.svg" alt="Pi" />
+  </picture>
+  <h1>Pi Web 启动失败</h1>
+  <p id="message">正在读取错误信息…</p>
+  <pre id="details"></pre>
+  <p class="hint">请确认 Node.js ≥ 22.19.0，并已执行 <code>npm install -g @agegr/pi-web@latest</code>。</p>
+  <div class="actions"><button id="retry">重试</button><button class="secondary" id="log">打开日志</button></div>
+</section></main>
+<script src="./error-renderer.js"></script>
+</body>
+</html>

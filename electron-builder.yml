@@ -1,0 +1,23 @@
+appId: com.piweb.box
+productName: Pi Web Box
+copyright: Copyright © Pi Web Box
+electronDownload:
+  mirror: https://npmmirror.com/mirrors/electron/
+asar: true
+directories:
+  output: dist
+files:
+  - build/**
+  - assets/**
+extraResources:
+  - from: assets
+    to: assets
+win:
+  target:
+    - target: portable
+      arch:
+        - x64
+  icon: assets/pi-logo-adaptive.ico
+portable:
+  artifactName: Pi Web Box Portable-${version}.exe
+  requestExecutionLevel: user

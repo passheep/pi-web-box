@@ -1,0 +1,28 @@
+{
+  "name": "pi-web-box",
+  "productName": "Pi Web Box",
+  "version": "0.4.1",
+  "private": true,
+  "description": "A quiet Windows desktop window for Pi Web",
+  "author": "Pi Web Box",
+  "main": "build/main.js",
+  "type": "commonjs",
+  "scripts": {
+    "prepare:assets": "node scripts/prepare-assets.mjs",
+    "build": "npm run prepare:assets && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "start": "npm run build && electron .",
+    "dev": "npm run build && electron .",
+    "dist": "npm run build && electron-builder --win portable",
+    "dist:dir": "npm run build && electron-builder --win dir"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "electron": "^43.4.1",
+    "electron-builder": "^26.0.12",
+    "sharp": "^0.35.3",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}
