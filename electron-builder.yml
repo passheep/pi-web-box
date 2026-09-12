@@ -18,6 +18,12 @@ win:
       arch:
         - x64
   icon: assets/pi-logo-adaptive.ico
+  # 只保留实际会用到的 Electron 语言包：默认打包全部 55 个语言包，解包后约 46 MB，
+  # 裁到英文和简体中文后不到 1.1 MB。由于 7z 对 .pak 压缩率很高，
+  # 最终安装包体积大约减少 7 MB（88.6 MB -> 81.4 MB），解包后减少约 45 MB。
+  electronLanguages:
+    - en-US
+    - zh-CN
 portable:
   artifactName: Pi Web Box Portable-${version}.exe
   requestExecutionLevel: user
