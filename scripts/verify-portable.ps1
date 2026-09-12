@@ -1,5 +1,10 @@
 $ErrorActionPreference = 'Stop'
-$exe = Join-Path $PSScriptRoot '..\dist\Pi Web Box Portable-0.4.1.exe'
+# 按版本号从新到旧取最新的便携版 EXE，避免升级版本后脚本失效。
+$portableExe = Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot '..\dist') -Filter 'Pi Web Box Portable-*.exe' |
+  Sort-Object { [version]($_.BaseName -replace '^Pi Web Box Portable-', '') } -Descending |
+  Select-Object -First 1
+if (-not $portableExe) { throw '在 dist 目录下没有找到 Pi Web Box Portable-*.exe，请先执行 npm run dist。' }
+$exe = $portableExe.FullName
 $shortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Pi Web Box.lnk'
 $log = Join-Path $env:APPDATA 'Pi Web Box\logs\pi-web.log'
 $before = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('Pi Web Box.exe', 'Pi Web Box Portable.exe') }).ProcessId

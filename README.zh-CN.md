@@ -40,7 +40,7 @@ npm run dist
 产物位于：
 
 ```text
-dist/Pi Web Box Portable-0.4.1.exe
+dist/Pi Web Box Portable-0.4.2.exe
 ```
 
 这是单文件便携版，不需要安装。将 EXE 放到任意有写入权限（或只读也可以运行）的目录即可。

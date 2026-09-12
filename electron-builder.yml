@@ -21,3 +21,10 @@ win:
 portable:
   artifactName: Pi Web Box Portable-${version}.exe
   requestExecutionLevel: user
+# 发布目标：electron-builder 用 package.json 的 version 拼出 v 前缀 tag。
+# releaseType 设为 release 表示 tag 推送后直接公开发布，改成 draft 则会先创建草稿。
+publish:
+  provider: github
+  owner: passheep
+  repo: pi-web-box
+  releaseType: release

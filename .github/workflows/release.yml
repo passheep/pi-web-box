@@ -1,0 +1,82 @@
+name: Release
+
+# 推送 v 开头的 tag 时自动构建便携版 EXE 并发布到 GitHub Releases。
+# 也可以在 Actions 页面手动触发，此时只构建并上传 artifact，不创建 Release。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# electron-builder 需要 contents: write 才能创建 Release 并上传资产。
+permissions:
+  contents: write
+
+# 覆盖项目 .npmrc 里的国内镜像：GitHub runner 在境外，官方源更快。
+env:
+  npm_config_electron_mirror: https://github.com/electron/electron/releases/download/
+
+jobs:
+  release:
+    name: 构建并发布便携版
+    runs-on: windows-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.19.0"
+          cache: npm
+
+      # electron-builder 用 package.json 的 version 作为 Release 的 tag，
+      # 与推送的 tag 不一致会发布到错误的 tag 上，所以这里提前拦截。
+      - name: 校验 tag 与 package.json 版本一致
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          if ($tag -ne "v$version") {
+            throw "tag $tag 与 package.json 中的版本 v$version 不一致：请先更新 package.json 的 version 并提交，再重新打 tag。"
+          }
+          Write-Host "版本校验通过：$tag"
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查
+        run: npm run typecheck
+
+      - name: 单元测试
+        run: npm test
+
+      - name: 生成图标资源并编译
+        run: npm run build
+
+      # GitHub 的 runner 在境外，走官方源下载 Electron 比项目 .npmrc 里的国内镜像更快。
+      # 注意必须用 npm_config_electron_mirror：@electron/get 读取镜像地址时，
+      # npm_config_electron_mirror（来自 .npmrc）的优先级高于 ELECTRON_MIRROR，
+      # 只写后者会被项目 .npmrc 覆盖掉。这里用环境变量形式在 job 级统一下发，
+      # 环境变量的优先级高于 .npmrc，npm ci 和打包两步都会生效。
+      - name: 打包便携版并发布到 Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: npx electron-builder --win portable --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # 手动触发时必须显式 --publish never：electron-builder 在 CI 环境下
+      # 会隐式启用 onTagOrDraft 发布策略，没有 token 会直接报错。
+      - name: 打包便携版（不发布）
+        if: github.event_name == 'workflow_dispatch'
+        run: npx electron-builder --win portable --publish never
+
+      - name: 上传手动构建产物
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pi-Web-Box-Portable
+          path: dist/*.exe
+          if-no-files-found: error

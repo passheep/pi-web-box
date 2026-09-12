@@ -1,6 +1,10 @@
 node_modules/
 build/
 dist/
+dist-verify/
 *.log
 .DS_Store
 npm-debug.log*
+
+# 本地发版流程文档，不提交到 GitHub
+发版流程.md
