@@ -5,6 +5,16 @@ import path from "node:path";
 
 export type IconTheme = "light" | "dark";
 
+/**
+ * 判断当前是否运行在 NSIS 安装版中。
+ * 安装版的 EXE 位于安装目录，快捷方式交给 NSIS 管理；
+ * 便携版会把 PORTABLE_EXECUTABLE_FILE 指向便携 EXE 自身（运行时解压到 Temp）。
+ */
+export function isInstalledBuild(execPath: string, portableExecutableFile?: string): boolean {
+  if (portableExecutableFile) return false;
+  return !execPath.toLowerCase().includes(`${path.sep}temp${path.sep}`);
+}
+
 export class ShortcutManager {
   constructor(private readonly log: (message: string) => void) {}
 
@@ -25,6 +35,13 @@ export class ShortcutManager {
 
   async createOrUpdate(theme: IconTheme): Promise<void> {
     if (process.platform !== "win32" || !app.isPackaged) return;
+
+    // 安装版由 NSIS 创建开始菜单和桌面快捷方式，
+    // 这里再用便携版逻辑去改写会指向错误的目标，所以直接跳过。
+    if (isInstalledBuild(process.execPath, process.env.PORTABLE_EXECUTABLE_FILE)) {
+      this.log("Skipped desktop shortcut: installed build manages shortcuts itself.");
+      return;
+    }
 
     const desktop = app.getPath("desktop");
     const shortcutPath = path.join(desktop, "Pi Web Box.lnk");

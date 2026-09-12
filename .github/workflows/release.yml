@@ -61,17 +61,17 @@ jobs:
       # npm_config_electron_mirror（来自 .npmrc）的优先级高于 ELECTRON_MIRROR，
       # 只写后者会被项目 .npmrc 覆盖掉。这里用环境变量形式在 job 级统一下发，
       # 环境变量的优先级高于 .npmrc，npm ci 和打包两步都会生效。
-      - name: 打包便携版并发布到 Release
+      - name: 打包便携版和安装包并发布到 Release
         if: startsWith(github.ref, 'refs/tags/v')
-        run: npx electron-builder --win portable --publish always
+        run: npx electron-builder --win portable nsis --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # 手动触发时必须显式 --publish never：electron-builder 在 CI 环境下
       # 会隐式启用 onTagOrDraft 发布策略，没有 token 会直接报错。
-      - name: 打包便携版（不发布）
+      - name: 打包便携版和安装包（不发布）
         if: github.event_name == 'workflow_dispatch'
-        run: npx electron-builder --win portable --publish never
+        run: npx electron-builder --win portable nsis --publish never
 
       - name: 上传手动构建产物
         if: github.event_name == 'workflow_dispatch'

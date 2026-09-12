@@ -38,9 +38,20 @@ npm install -g @agegr/pi-web@latest
 - Node.js **22.19.0 or newer**
 - A global `pi-web` command on `PATH`
 
+## Download and Install
+
+Each release ships two artifacts:
+
+| Artifact | Type | Notes |
+| --- | --- | --- |
+| `Pi Web Box Setup-<version>.exe` | Installer | Guided install, selectable install directory, Start Menu and desktop shortcuts, uninstall entry in Apps & Features |
+| `Pi Web Box Portable-<version>.exe` | Portable | Single file, no installation, runs from a USB stick or any folder |
+
+The installer installs per user by default and needs no administrator rights. Uninstalling keeps your Pi Web Box settings and logs.
+
 ## Quick Start
 
-Download `Pi Web Box Portable-<version>.exe` and double-click it. On first launch the app creates or updates a desktop shortcut named `Pi Web Box.lnk` that always points to the EXE you just started, so moving the portable file only requires starting it once from the new location.
+Download either artifact and run it. With the portable build, the app creates or updates a desktop shortcut named `Pi Web Box.lnk` that always points to the EXE you just started, so moving the portable file only requires starting it once from the new location. The installed build lets the installer manage its own shortcuts instead.
 
 The app listens on `127.0.0.1` only and never exposes the service to the local network.
 
@@ -50,10 +61,19 @@ The app listens on `127.0.0.1` only and never exposes the service to the local n
 npm install
 npm run typecheck
 npm run dev      # build and run from source
-npm run dist     # build the portable EXE into dist/
+npm run dist     # build the installer and the portable EXE into dist/
 ```
 
 `npm run dist` explicitly downloads Electron from `https://npmmirror.com/mirrors/electron/`, so an outdated global npm mirror configuration cannot break packaging.
+
+To build only one target:
+
+```powershell
+npm run dist:nsis        # installer only
+npm run dist:portable    # portable only
+```
+
+> Close any running Pi Web Box before packaging. Windows locks a running EXE, which makes the build stall at `building target=` without an error.
 
 ## Configuration
 

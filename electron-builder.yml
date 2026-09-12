@@ -14,7 +14,12 @@ extraResources:
     to: assets
 win:
   target:
+    # portable：单文件便携版，双击即用，无需安装。
     - target: portable
+      arch:
+        - x64
+    # nsis：真正的安装包，向导式安装并注册卸载入口。
+    - target: nsis
       arch:
         - x64
   icon: assets/pi-logo-adaptive.ico
@@ -27,6 +32,21 @@ win:
 portable:
   artifactName: Pi Web Box Portable-${version}.exe
   requestExecutionLevel: user
+# NSIS 安装包：向导式安装，可自选安装目录，安装后写入开始菜单和桌面快捷方式，
+# 并在“应用和功能”中注册卸载入口。perMachine 为 false 表示默认按当前用户安装，不需管理员权限。
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Pi Web Box
+  artifactName: Pi Web Box Setup-${version}.exe
+  # 安装界面只保留简体中文和英文，与本项目 electronLanguages 保持一致的裁剪思路。
+  installerLanguages:
+    - zh_CN
+    - en_US
+  deleteAppDataOnUninstall: false
 # 发布目标：electron-builder 用 package.json 的 version 拼出 v 前缀 tag。
 # releaseType 设为 release 表示 tag 推送后直接公开发布，改成 draft 则会先创建草稿。
 publish:

@@ -28,7 +28,18 @@ npm run dev
 
 开发模式不会修改桌面，也不会自动创建快捷方式。
 
-## 构建便携版
+## 下载与安装
+
+GitHub Release 每个版本同时提供两种产物，按需选择：
+
+| 产物 | 类型 | 特点 |
+| --- | --- | --- |
+| `Pi Web Box Setup-<版本>.exe` | 安装包 | 向导式安装，可自选安装目录，自动创建开始菜单和桌面快捷方式，在“应用和功能”中注册卸载入口 |
+| `Pi Web Box Portable-<版本>.exe` | 便携版 | 单文件，双击即用，无需安装，适合放 U 盘或临时使用 |
+
+安装包默认按当前用户安装（不需要管理员权限），卸载时不会删除 Pi Web Box 的配置和日志。
+
+## 构建
 
 ```powershell
 npm install
@@ -40,10 +51,18 @@ npm run dist
 产物位于：
 
 ```text
-dist/Pi Web Box Portable-0.4.3.exe
+dist/Pi Web Box Setup-0.4.4.exe       # 安装包
+dist/Pi Web Box Portable-0.4.4.exe    # 便携版
 ```
 
-这是单文件便携版，不需要安装。将 EXE 放到任意有写入权限（或只读也可以运行）的目录即可。
+只想构建其中一种时：
+
+```powershell
+npm run dist:nsis        # 只构建安装包
+npm run dist:portable    # 只构建便携版
+```
+
+> 打包前请关闭正在运行的 Pi Web Box。如果 dist 里同版本的 EXE 正在运行，Windows 会锁住文件，构建会卡在 `building target=` 不动。
 
 ## 日常使用
 
