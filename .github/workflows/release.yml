@@ -73,8 +73,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # electron-builder 复用已有 release 时可能保留草稿状态（例如 tag 被重推后）。
-      # 这里统一确认一次：仍是草稿就改为正式发布，否则用户在外网看不到资产。
+      # electron-builder 复用已有 release 时不会恢复发布状态（例如 tag 被重推后原 Release
+      # 会变成草稿），导致资产上传成功但外面看不到。这里统一确认一次并解除草稿。
+      # 注意：GitHub 的 releases/tags/{tag} 对草稿返回 404，必须从列表里按 tag 找。
       - name: 确保 Release 已正式发布
         if: always() && startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -86,13 +87,18 @@ jobs:
             "User-Agent"  = "pi-web-box"
             Accept        = "application/vnd.github+json"
           }
-          $release = Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag" -Headers $headers
-          if ($release.draft) {
-            Write-Host "检测到草稿 Release（id=$($release.id)），正在转为正式发布…"
+          $all = @(Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases?per_page=30" -Headers $headers)
+          $target = $all | Where-Object { $_.tag_name -eq $tag -or $_.tag_name -eq $tag.TrimStart('v') } | Select-Object -First 1
+          if (-not $target) {
+            Write-Host "::error title=ReleaseMissing::$tag 对应的 Release 不存在，无法发布"
+            exit 0
+          }
+          if ($target.draft) {
+            Write-Host "检测到草稿 Release（id=$($target.id)），正在转为正式发布…"
             $payload = @{ draft = $false; prerelease = $false } | ConvertTo-Json
-            Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases/$($release.id)" `
-              -Method Patch -Headers $headers -Body $payload -ContentType "application/json" | Out-Null
-            Write-Host "已转为正式发布"
+            $updated = Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases/$($target.id)" `
+              -Method Patch -Headers $headers -Body $payload -ContentType "application/json"
+            Write-Host "已转为正式发布，published_at=$($updated.published_at)"
           } else {
             Write-Host "Release 已是正式发布状态，无需处理"
           }
@@ -132,7 +138,9 @@ jobs:
           }
 
           try {
-            $release = Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag" -Headers $headers
+            $mine = $all | Where-Object { $_.tag_name -eq $tag -or $_.tag_name -eq $tag.TrimStart('v') } | Select-Object -First 1
+            if (-not $mine) { throw "列表中没有任何 $tag 的 Release" }
+            $release = $mine
           } catch {
             Emit-Note "error" "ReleaseMissing" "找不到 tag $tag 对应的 Release：$($_.Exception.Message)"
             throw "未创建 Release $tag"
