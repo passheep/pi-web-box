@@ -78,6 +78,7 @@ jobs:
       - name: 确保 Release 已正式发布
         if: always() && startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
+        continue-on-error: true
         run: |
           $tag = '${{ github.ref_name }}'
           $headers = @{
@@ -96,57 +97,56 @@ jobs:
             Write-Host "Release 已是正式发布状态，无需处理"
           }
 
-      # electron-builder 在少数情况下会静默跳过上传而不报错（如判定 release 已存在），
-      # 这里用带 token 的 API 复查一次，并把诊断写进 Step Summary 方便回溯。
+      # electron-builder 在少数情况下会静默跳过上传而不报错（如判定 release 已存在）。
+      # 这里用带 token 的 API 复查，并把诊断写成 workflow 注解（匿名可读）方便回溯。
       - name: 校验 Release 资产是否完整
         if: always() && startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         run: |
           $tag = '${{ github.ref_name }}'
-          $summaryPath = $env:GITHUB_STEP_SUMMARY
           $headers = @{
             Authorization = "Bearer ${{ secrets.GITHUB_TOKEN }}"
             "User-Agent"  = "pi-web-box"
             Accept        = "application/vnd.github+json"
           }
 
-          # 仓库当前的 Release 快照，用于判断是否命中「已存在 release」分支。
-          "## 发布诊断：$tag" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+          # 用注解输出诊断：注解在 check-runs API 里匿名可读。
+          function Emit-Note([string]$level, [string]$title, [string]$text) {
+            $oneLine = ($text -replace "[\r\n]+", " | ")
+            if ($oneLine.Length -gt 1500) { $oneLine = $oneLine.Substring(0, 1500) }
+            Write-Host "::$level title=$title::$oneLine"
+          }
+
           $all = @(Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases?per_page=30" -Headers $headers)
-          "" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
-          "### 仓库现有 Release" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
-          foreach ($item in $all) {
-            $names = @($item.assets | ForEach-Object { $_.name }) -join ", "
-            "- tag=$($item.tag_name) draft=$($item.draft) published=$($item.published_at) assets=[$names]" |
-              Out-File -FilePath $summaryPath -Encoding utf8 -Append
-          }
+          $snapshot = ($all | ForEach-Object {
+            $n = @($_.assets | ForEach-Object { $_.name }) -join ","
+            "tag=$($_.tag_name) draft=$($_.draft) pub=$($_.published_at) assets[$n]"
+          }) -join " || "
+          Emit-Note "warning" "ReleaseList" $snapshot
 
-          "" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
-          "### electron-builder 输出" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
-          "```" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
           if (Test-Path publish.log) {
-            Get-Content publish.log | Select-Object -Last 60 | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+            $tail = (Get-Content publish.log | Select-Object -Last 25) -join " | "
+            Emit-Note "warning" "PublishLog" $tail
           } else {
-            "（未生成 publish.log）" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+            Emit-Note "warning" "PublishLog" "（未生成 publish.log）"
           }
-          "```" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
 
-          $release = Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag" -Headers $headers
+          try {
+            $release = Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag" -Headers $headers
+          } catch {
+            Emit-Note "error" "ReleaseMissing" "找不到 tag $tag 对应的 Release：$($_.Exception.Message)"
+            throw "未创建 Release $tag"
+          }
           Write-Host "Release: name=$($release.name) draft=$($release.draft) prerelease=$($release.prerelease)"
           $names = @($release.assets | ForEach-Object { $_.name })
-          Write-Host "现有资产: $($names -join ', ')"
+          Emit-Note "warning" "ReleaseAssets" "draft=$($release.draft) assets[$($names -join ',')]"
           $missing = @()
           if (-not ($names -contains "latest.yml")) { $missing += "latest.yml" }
-          if (-not ($names -contains "Pi-Web-Box-Setup-$($release.tag_name.TrimStart('v')).exe")) {
-            $missing += "安装包 EXE"
-          }
-          if ($names.Count -eq 0) { $missing += "全部资产（Release 为空）" }
+          if (-not ($names -contains "Pi-Web-Box-Setup-$($release.tag_name.TrimStart('v')).exe")) { $missing += "安装包 EXE" }
           if ($missing.Count -gt 0) {
-            $summaryText = "`n**校验失败，缺少：$($missing -join '、')**`n"
-            $summaryText | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+            Emit-Note "error" "ReleaseIncomplete" "缺少：$($missing -join '、')"
             throw "Release 资产不完整，缺少：$($missing -join '、')"
           }
-          "`n**校验通过**`n" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
           Write-Host "Release 资产校验通过"
 
       # 无论成功失败都保留发布日志，便于回溯上传失败的具体原因。
