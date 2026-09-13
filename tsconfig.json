@@ -1,6 +1,9 @@
 {
   "compilerOptions": {
     "target": "ES2022",
+    // 主进程代码不应该访问 window/document，这里只保留 ES 标准库，
+    // 避免渲染进程专有的全局对象被误用到主进程。
+    "lib": ["ES2022"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "strict": true,

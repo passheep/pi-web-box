@@ -1,20 +1,38 @@
 import type { ComponentVersions } from "./contracts.js";
+import { THEME_PALETTES } from "./themes.js";
 
 export type VersionPanelData = ComponentVersions & {
   iconDataUrl: string;
+  // 关于面板展示的联系方式与仓库地址。
+  github: string;
+  qq: string;
+  // 提示词增强是否已配置模型，未配置时按钮置灰并给出提示。
+  enhanceConfigured: boolean;
 };
 
 const PANEL_ID = "pi-web-box-version-panel";
 
 /**
- * 生成注入到 Pi Web 页面的脚本，包含两块内容：
- * 1. 右下角悬浮球与「关于」面板（版本信息、GitHub 链接、Box 设置入口）；
- * 2. 外观主题监听，把当前主题和背景色回传给主进程，用于同步 Windows 标题栏。
+ * 生成注入到 Pi Web 页面的脚本，包含三块内容：
+ * 1. 右下角悬浮球与「关于」面板（版本、联系方式、仓库地址、设置与统计入口）；
+ * 2. 外观主题监听，把当前主题和背景色回传给主进程，用于同步 Windows 标题栏；
+ * 3. 用主题变量覆盖面板内配色，使弹窗跟随 Pi Web 主题。
  */
 export function buildVersionPanelScript(data: VersionPanelData): string {
   const payload = JSON.stringify(data).replaceAll("<", "\\u003c");
+  // 把五个主题的面板配色一并带过去，避免依赖 prefers-color-scheme 而与实际主题不一致。
+  const palettePayload = JSON.stringify(THEME_PALETTES).replaceAll("<", "\\u003c");
+
   return `(() => {
     const data = ${payload};
+    const palettes = ${palettePayload};
+
+    // 复用已有实例：仅更新数据，避免重复注入造成多个悬浮球。
+    const existing = document.getElementById("${PANEL_ID}");
+    if (existing && existing.__piWebBoxUpdate) {
+      existing.__piWebBoxUpdate(data);
+      return;
+    }
     document.getElementById("${PANEL_ID}")?.remove();
 
     const host = document.createElement("div");
@@ -23,39 +41,60 @@ export function buildVersionPanelScript(data: VersionPanelData): string {
     shadow.innerHTML = \`
       <style>
         :host { all: initial; }
-        .wrap { position: fixed; right: 20px; bottom: 20px; z-index: 2147483647; font-family: "Segoe UI", system-ui, sans-serif; color: #202124; }
-        .trigger { width: 46px; height: 46px; padding: 0; border: 1px solid #d4d4d8; border-radius: 50%; background: #fff; box-shadow: 0 3px 12px rgba(0,0,0,.16); cursor: pointer; display: grid; place-items: center; transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease; }
-        .trigger:hover { border-color: #a1a1aa; box-shadow: 0 6px 18px rgba(0,0,0,.2); transform: translateY(-1px); }
-        .trigger:focus-visible { outline: 2px solid #2563eb; outline-offset: 3px; }
-        .trigger img { width: 31px; height: 31px; display: block; }
-        .panel { position: absolute; right: 0; bottom: 56px; width: 280px; padding: 8px; border: 1px solid #dfe3e8; border-radius: 10px; background: #fff; box-shadow: 0 12px 36px rgba(0,0,0,.2); box-sizing: border-box; opacity: 0; visibility: hidden; pointer-events: none; transform: translateY(8px) scale(.97); transform-origin: bottom right; transition: opacity 160ms ease, transform 180ms ease, visibility 0s linear 180ms; }
+        .wrap {
+          position: fixed; right: 20px; bottom: 20px; z-index: 2147483647;
+          font-family: "Segoe UI", system-ui, sans-serif;
+          /* 配色跟随 Pi Web 主题，由脚本按当前主题写入 */
+          --p-bg: #fff; --p-panel: #f5f5f5; --p-border: #e0e0e0;
+          --p-text: #1a1a1a; --p-muted: #515c6b; --p-accent: #245bce; --p-hover: #eee;
+          /* logo 与圆形按钮底色随主题深浅切换 */
+          --p-logo-bg: #fff; --p-logo-fg: #1a1a1a;
+        }
+        .trigger { width: 46px; height: 46px; padding: 0; border: 1px solid var(--p-border); border-radius: 50%; background: var(--p-logo-bg); box-shadow: 0 3px 12px rgba(0,0,0,.16); cursor: pointer; display: grid; place-items: center; transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease; }
+        .trigger:hover { border-color: var(--p-accent); box-shadow: 0 6px 18px rgba(0,0,0,.2); transform: translateY(-1px); }
+        .trigger:focus-visible { outline: 2px solid var(--p-accent); outline-offset: 3px; }
+        .trigger svg { width: 24px; height: 24px; display: block; fill: var(--p-logo-fg); }
+        .panel { position: absolute; right: 0; bottom: 56px; width: 292px; padding: 8px; border: 1px solid var(--p-border); border-radius: 10px; background: var(--p-bg); box-shadow: 0 12px 36px rgba(0,0,0,.2); box-sizing: border-box; opacity: 0; visibility: hidden; pointer-events: none; transform: translateY(8px) scale(.97); transform-origin: bottom right; transition: opacity 160ms ease, transform 180ms ease, visibility 0s linear 180ms; }
         .panel::after { content: ""; position: absolute; right: 0; bottom: -12px; width: 72px; height: 14px; }
         .panel.open { opacity: 1; visibility: visible; pointer-events: auto; transform: translateY(0) scale(1); transition-delay: 0s; }
-        .title { padding: 7px 9px 8px; font-size: 13px; font-weight: 650; color: #202124; }
+        .title { padding: 7px 9px 8px; font-size: 13px; font-weight: 650; color: var(--p-text); }
         .item { min-height: 44px; padding: 7px 9px; border-radius: 7px; display: flex; align-items: center; justify-content: space-between; gap: 12px; box-sizing: border-box; text-decoration: none; color: inherit; width: 100%; border: 0; background: transparent; font: inherit; text-align: left; cursor: pointer; }
-        a.item:hover, button.item:hover { background: #f2f4f6; }
-        a.item:focus-visible, button.item:focus-visible { outline: 2px solid #2563eb; outline-offset: -2px; }
-        .name { font-size: 13px; font-weight: 600; }
-        .version { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #68707b; font-family: Consolas, monospace; font-size: 12px; }
-        .external { color: #68707b; font-size: 11px; margin-left: 4px; }
-        .divider { height: 1px; margin: 6px 4px; background: #e8eaed; }
-        .action { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
-        .action svg { width: 15px; height: 15px; flex: none; color: #68707b; }
-        @media (prefers-color-scheme: dark) {
-          .panel { border-color: #3f3f46; background: #27272a; color: #f4f4f5; }
-          .title { color: #f4f4f5; }
-          a.item:hover, button.item:hover { background: #3f3f46; }
-          .version, .external { color: #a1a1aa; }
-          .action svg { color: #a1a1aa; }
-          .divider { background: #3f3f46; }
-        }
-        @media (prefers-reduced-motion: reduce) {
-          .trigger, .panel { transition: none; }
-        }
+        a.item:hover, button.item:hover { background: var(--p-hover); }
+        a.item:focus-visible, button.item:focus-visible { outline: 2px solid var(--p-accent); outline-offset: -2px; }
+        button.item:disabled { cursor: not-allowed; opacity: .55; }
+        .name { font-size: 13px; font-weight: 600; color: var(--p-text); }
+        .version { max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--p-muted); font-family: Consolas, monospace; font-size: 12px; }
+        .external { color: var(--p-muted); font-size: 11px; margin-left: 4px; }
+        .divider { height: 1px; margin: 6px 4px; background: var(--p-border); }
+        /* 图标与文字在同一基线上对齐：图标用块级元素并消除行高影响 */
+        .action { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; line-height: 1; color: var(--p-text); }
+        .action svg { width: 15px; height: 15px; flex: none; display: block; color: var(--p-muted); }
+        .action span { line-height: 15px; }
+        .meta { padding: 2px 9px 8px; font-size: 11.5px; line-height: 1.6; color: var(--p-muted); }
+        .meta code { font-family: Consolas, monospace; color: var(--p-text); }
+        .meta a { color: var(--p-accent); text-decoration: none; }
+        .meta a:hover { text-decoration: underline; }
+        @media (prefers-reduced-motion: reduce) { .trigger, .panel { transition: none; } }
       </style>
       <div class="wrap">
         <div class="panel" role="dialog" aria-label="关于 Pi Web Box">
           <div class="title">关于</div>
+          <button class="item" type="button" data-action="usage" title="查看 token 用量统计">
+            <span class="action">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 3v18h18"></path><rect x="7" y="12" width="3" height="6" rx="1"></rect><rect x="12" y="8" width="3" height="10" rx="1"></rect><rect x="17" y="5" width="3" height="13" rx="1"></rect>
+              </svg>
+              <span>Token 统计</span>
+            </span><span class="version">查看</span>
+          </button>
+          <button class="item" type="button" data-action="enhance-settings" title="设置提示词增强">
+            <span class="action">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"></path>
+              </svg>
+              <span>提示词增强</span>
+            </span><span class="version">设置</span>
+          </button>
           <button class="item" type="button" data-action="settings" title="打开 Pi Web Box 设置">
             <span class="action">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -75,30 +114,64 @@ export function buildVersionPanelScript(data: VersionPanelData): string {
           <a class="item" href="https://github.com/passheep/pi-web-box" target="_blank" rel="noopener noreferrer" title="在浏览器中打开 Pi Web Box GitHub">
             <span class="name">Pi Web Box <span class="external">↗</span></span><span class="version"></span>
           </a>
+          <div class="divider"></div>
+          <div class="meta">
+            联系 QQ：<code>903081605</code><br>
+            仓库：<a href="https://github.com/passheep/pi-web-box" target="_blank" rel="noopener noreferrer">github.com/passheep/pi-web-box</a>
+          </div>
         </div>
         <button class="trigger" type="button" title="关于 Pi Web Box" aria-label="关于 Pi Web Box" aria-expanded="false">
-          <img alt="Pi" />
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h13v20h-2.6V13.2h-2.9V22h-2.6V13.2H8.6V22H6V2zm5.2 2.4h2.6v6.4h-2.6V4.4z"></path></svg>
         </button>
       </div>
     \`;
 
-    const versions = shadow.querySelectorAll(".version");
-    versions[0].textContent = "配置";
-    versions[1].textContent = data.pi;
-    versions[2].textContent = data.piWeb;
-    versions[3].textContent = data.piWebBox;
-    shadow.querySelector("img").src = data.iconDataUrl;
-
     const wrap = shadow.querySelector(".wrap");
     const button = shadow.querySelector(".trigger");
     const panel = shadow.querySelector(".panel");
+    const versions = shadow.querySelectorAll(".version");
+    const meta = shadow.querySelector(".meta");
     let closeTimer;
 
-    // 鼠标移入展开，移出稍作延迟后收起，避免跨过按钮与面板间隙时闪烁。
+    // 主题配色映射：深色主题用深底浅字，浅色主题反之。
+    const applyPalette = (theme) => {
+      const palette = palettes[theme] || palettes.light;
+      const isDark = theme === "dark" || theme === "pine";
+      const style = wrap.style;
+      style.setProperty("--p-bg", palette.background);
+      style.setProperty("--p-panel", palette.panel);
+      style.setProperty("--p-border", palette.border);
+      style.setProperty("--p-text", palette.text);
+      style.setProperty("--p-muted", palette.textMuted);
+      style.setProperty("--p-accent", palette.accent);
+      // hover 底色取面板色向文字色靠拢一点，两种主题都适用。
+      style.setProperty("--p-hover", isDark ? palette.panel : palette.panel);
+      // logo：深色主题用深底浅字，浅色主题用浅底深字。
+      style.setProperty("--p-logo-bg", isDark ? palette.panel : "#ffffff");
+      style.setProperty("--p-logo-fg", isDark ? palette.text : "#1a1a1a");
+    };
+
+    const update = (next) => {
+      versions[0].textContent = "查看";
+      versions[1].textContent = "设置";
+      versions[2].textContent = "配置";
+      versions[3].textContent = next.pi;
+      versions[4].textContent = next.piWeb;
+      versions[5].textContent = next.piWebBox;
+      if (next.qq) {
+        meta.innerHTML = '联系 QQ：<code>' + next.qq + '</code><br>仓库：<a href="' + next.github +
+          '" target="_blank" rel="noopener noreferrer">github.com/passheep/pi-web-box</a>';
+      }
+      applyPalette(document.documentElement.dataset.theme || "light");
+    };
+    host.__piWebBoxUpdate = update;
+    update(data);
+
     const setOpen = (open) => {
       window.clearTimeout(closeTimer);
       panel.classList.toggle("open", open);
       button.setAttribute("aria-expanded", String(open));
+      if (open) applyPalette(document.documentElement.dataset.theme || "light");
     };
     const scheduleClose = () => {
       window.clearTimeout(closeTimer);
@@ -112,10 +185,12 @@ export function buildVersionPanelScript(data: VersionPanelData): string {
     button.addEventListener("click", () => setOpen(true));
     shadow.addEventListener("click", (event) => {
       const target = event.target.closest?.("[data-action]");
-      if (target?.dataset.action === "settings") {
-        setOpen(false);
-        window.piWebBox?.openSettings?.();
-      }
+      if (!target) return;
+      const action = target.dataset.action;
+      setOpen(false);
+      if (action === "settings") window.piWebBox?.openSettings?.();
+      if (action === "usage") window.piWebBox?.openUsage?.();
+      if (action === "enhance-settings") window.piWebBox?.openSettings?.("enhance");
     });
     shadow.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
@@ -125,35 +200,40 @@ export function buildVersionPanelScript(data: VersionPanelData): string {
     });
     document.body.appendChild(host);
 
-    // ── 外观主题监听：把当前主题回传主进程，用于同步 Windows 原生标题栏 ──
+    // ── 外观主题监听：同步标题栏，并让面板跟随主题换色 ──
     if (!window.__piWebBoxThemeSync) {
       const readBackground = () => {
         const value = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
         return /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(value) ? value : "";
       };
+      // 标题栏取顶栏实际使用的面板底色，页面主体与顶栏才能连成一片。
+      const readToolbarBackground = () => {
+        const value = getComputedStyle(document.documentElement).getPropertyValue("--bg-panel").trim();
+        return /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(value) ? value : "";
+      };
       const report = () => {
-        const theme = document.documentElement.dataset.theme || "";
-        const background = readBackground();
-        const isDark = document.documentElement.classList.contains("dark");
+        const root = document.documentElement;
+        const theme = root.dataset.theme || "";
+        const isDark = root.classList.contains("dark");
         try {
-          window.piWebBox?.reportTheme?.({ theme, background, isDark });
+          window.piWebBox?.reportTheme?.({
+            theme,
+            background: readToolbarBackground() || readBackground(),
+            isDark,
+          });
         } catch (error) {
           void error;
         }
+        // 面板同步换色，无需重新打开弹窗。
+        const sync = document.getElementById("${PANEL_ID}");
+        sync?.__piWebBoxUpdate?.(data);
       };
-      const observer = new MutationObserver(() => {
-        // 主题切换会同时改动 data-theme 和 dark 类，这里统一延迟到下一帧再读取，
-        // 保证拿到的是切换完成后的实际背景色。
-        window.requestAnimationFrame(report);
-      });
+      const observer = new MutationObserver(() => window.requestAnimationFrame(report));
       observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "class"] });
-
-      // auto 主题跟随系统，系统外观变化时也要同步。
       window.matchMedia?.("(prefers-color-scheme: dark)").addEventListener?.("change", report);
       window.__piWebBoxThemeSync = { observer, report };
     }
 
-    // 页面首次注入时立即上报一次，避免标题栏停留在系统默认色。
     window.__piWebBoxThemeSync.report();
   })()`;
 }

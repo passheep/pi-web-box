@@ -1,16 +1,22 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, shell, Tray } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, net, screen, shell } from "electron";
+import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 import type {
   BoxSettingsInput,
   ComponentVersions,
+  EnhanceRequest,
+  EnhanceResponse,
+  ProviderOption,
+  RunningState,
   SaveSettingsResult,
   SettingsSnapshot,
   StartupProgress,
   ThemeReport,
+  UsageQuery,
 } from "./contracts.js";
 import { PiWebProcessManager } from "./pi-web-process.js";
-import { SettingsStore, type BoxSettings } from "./config.js";
+import { isLoopbackHostname, SettingsStore, type BoxSettings } from "./config.js";
 import { ShortcutManager, type IconTheme } from "./shortcut.js";
 import { getPalette, isKnownTheme } from "./themes.js";
 import { resolveTitleBarBackground, TitleBarColorizer } from "./titlebar.js";
@@ -22,15 +28,26 @@ import {
 } from "./version-manager.js";
 import { buildVersionPanelScript } from "./version-panel.js";
 import { buildSettingsHtml } from "./settings-view.js";
+import { buildUsageHtml } from "./usage-view.js";
+import { buildEnhancePanelScript } from "./enhance-panel.js";
+import { buildUsageOverview, readUsageRecords, toLocalDate, usageLogPath } from "./usage.js";
+import { checkUsageLogExtension, installUsageLogExtension, piAgentDirectory } from "./extensions.js";
+import { enhancePrompt, readProviders, SCENE_PROMPTS } from "./enhance.js";
+import { TrayController, trayIconPath } from "./tray.js";
 
 const APP_ID = "com.piweb.box";
 const GITHUB_URL = "https://github.com/passheep/pi-web-box";
+const CONTACT_QQ = "903081605";
+// 运行状态轮询间隔。接口很轻，但仍保持一个不打扰的节奏。
+const RUNNING_POLL_MS = 4_000;
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
 
 let mainWindow: BrowserWindow | undefined;
 let settingsWindow: BrowserWindow | undefined;
-let tray: Tray | undefined;
+let usageWindow: BrowserWindow | undefined;
+let trayController: TrayController | undefined;
+let runningPoller: NodeJS.Timeout | undefined;
 let manager: PiWebProcessManager | undefined;
 let shortcutManager: ShortcutManager | undefined;
 let settingsStore: SettingsStore | undefined;
@@ -41,8 +58,12 @@ let isQuitting = false;
 let versionPanelIconDataUrl = "";
 let settingsIconDataUrl = "";
 let currentTheme = "";
-// 记录 Pi Web 页面实测到的背景色，标题栏优先生效该值。
+// 记录 Pi Web 页面实测到的标题栏背景色（顶栏的 --bg-panel），标题栏优先生效该值。
 let currentThemeBackground = "";
+// 设置窗口打开时希望定位到的页签，用于从关于面板直接进入增强设置。
+let settingsInitialPane = "appearance";
+// 最近一次运行状态，供界面查询。
+let runningState: RunningState = { runningCount: 0, justFinished: false };
 let status = { message: "", details: "", logPath: "" };
 let startupProgress: StartupProgress = {
   title: "正在启动 Pi Web",
@@ -93,7 +114,12 @@ function getIconTheme(): IconTheme {
 async function applySystemTheme(): Promise<void> {
   const theme = getIconTheme();
   // 任务栏不使用纯黑/纯白图标，统一使用深色底白色 Pi 的高对比图标。
-  mainWindow?.setIcon(assetPath("pi-logo-adaptive.ico"));
+  try {
+    mainWindow?.setIcon(assetPath("pi-logo-adaptive.ico"));
+  } catch (error) {
+    // 图标缺失不应阻断启动，记录下来继续。
+    log(`Could not apply window icon: ${error instanceof Error ? error.message : String(error)}`);
+  }
   await shortcutManager?.createOrUpdate(theme);
   log(`Applied ${theme} Windows theme icon.`);
 }
@@ -281,16 +307,24 @@ function readIconDataUrl(fileName: string): string {
 async function injectVersionPanel(): Promise<void> {
   if (!mainWindow || mainWindow.isDestroyed() || !isPiWebPage(mainWindow.webContents.getURL())) return;
   if (!versionPanelIconDataUrl) {
-    // 悬浮按钮使用白底黑色 Pi，避免高对比任务栏图标在页面中显得过重。
+    // 悬浮按钮的图标随主题在深浅两版间切换，这里只预热，具体用哪张由页面决定。
     versionPanelIconDataUrl = readIconDataUrl("pi-logo-on-light.svg");
   }
   try {
-    await mainWindow.webContents.executeJavaScript(buildVersionPanelScript({
-      ...componentVersions,
-      iconDataUrl: versionPanelIconDataUrl,
-    }), true);
+    // 关于面板：版本、联系方式、设置与统计入口。
+    await mainWindow.webContents.executeJavaScript(
+      buildVersionPanelScript(buildPanelData(versionPanelIconDataUrl)), true,
+    );
   } catch (error) {
     log(`Could not inject version panel: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  try {
+    // 输入区：场景选择 + 提示词增强 + 回到底部。
+    await mainWindow.webContents.executeJavaScript(
+      buildEnhancePanelScript(buildEnhanceData()), true,
+    );
+  } catch (error) {
+    log(`Could not inject enhance panel: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -319,6 +353,36 @@ function updateTheme(theme: string, background: string): void {
   broadcastThemeToSettings();
 }
 
+/** 取本机内网 IPv4 地址，用于在设置里展示局域网访问地址。 */
+function getLanAddress(): string {
+  const store = settingsStore!;
+  const { hostname, port } = store.get().piWeb;
+  // 只在真正监听了非回环地址时才给出地址，否则那个地址根本连不上。
+  if (isLoopbackHostname(hostname)) return "";
+  // 优先物理网卡，跳过虚拟网卡常见的地址段。
+  const candidates: Array<{ name: string; address: string; priority: number }> = [];
+  for (const [name, entries] of Object.entries(os.networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      if (entry.family !== "IPv4" || entry.internal) continue;
+      const priority = /wi-?fi|wlan|无线/i.test(name) ? 0 : /ethernet|以太/i.test(name) ? 1 : 2;
+      candidates.push({ name, address: entry.address, priority });
+    }
+  }
+  const picked = candidates.sort((left, right) => left.priority - right.priority)[0];
+  if (!picked) return "";
+  return `http://${picked.address}:${port.trim() || "30141"}`;
+}
+
+/** 读取 pi 已配置的供应商与模型，供设置界面选择增强模型。 */
+function getProviderOptions(): ProviderOption[] {
+  return readProviders().map((provider) => ({
+    id: provider.id,
+    name: provider.name,
+    hasApiKey: provider.hasApiKey,
+    models: provider.models.map((model) => ({ id: model.id, name: model.name })),
+  }));
+}
+
 function getSettingsSnapshot(): SettingsSnapshot {
   const store = settingsStore!;
   const settings = store.get();
@@ -330,7 +394,63 @@ function getSettingsSnapshot(): SettingsSnapshot {
     versions: componentVersions,
     theme: palette.id,
     themeLabel: palette.label,
+    providers: getProviderOptions(),
+    usageExtension: usageExtensionInfo(),
+    lanAddress: getLanAddress(),
+    about: {
+      version: app.getVersion(),
+      github: GITHUB_URL,
+      qq: CONTACT_QQ,
+      electron: process.versions.electron || "-",
+      node: process.versions.node || "-",
+      chrome: process.versions.chrome || "-",
+    },
   };
+}
+
+/** 组装注入到页面里的关于面板数据。 */
+function buildPanelData(iconDataUrl: string) {
+  const { provider, model } = settingsStore!.get().enhance;
+  return {
+    ...componentVersions,
+    iconDataUrl,
+    github: GITHUB_URL,
+    qq: CONTACT_QQ,
+    enhanceConfigured: !!(provider && model),
+  };
+}
+
+/** 组装提示词增强控件需要的数据。 */
+function buildEnhanceData() {
+  const { provider, model } = settingsStore!.get().enhance;
+  return {
+    palette: getPalette(currentTheme, nativeTheme.shouldUseDarkColors),
+    configured: !!(provider && model),
+    scenes: Object.entries(SCENE_PROMPTS).map(([id, scene]) => ({ id, label: scene.label })),
+    defaultScene: "general",
+  };
+}
+
+/** 查询 pi-usage-log 是否已安装。开发环境下内置扩展在应用根目录。 */
+function usageExtensionInfo() {
+  return checkUsageLogExtension(process.resourcesPath, app.isPackaged, app.getAppPath());
+}
+
+/** 解析用量查询区间，日期非法时回退到最近 30 天。 */
+function resolveUsageRange(query: UsageQuery): { from: string; to: string } {
+  const today = new Date();
+  const isoDate = (date: Date) => toLocalDate(date.getTime());
+  const isDate = (value: unknown): value is string => typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+  let to = isDate(query?.to) ? query.to : isoDate(today);
+  let from = isDate(query?.from) ? query.from : "";
+  if (!from) {
+    const start = new Date(today);
+    start.setDate(start.getDate() - 29);
+    from = isoDate(start);
+  }
+  // 起止写反时自动交换，避免出现空结果让人困惑。
+  if (from > to) [from, to] = [to, from];
+  return { from, to };
 }
 
 function broadcastSettingsChange(): void {
@@ -343,7 +463,8 @@ function broadcastSettingsChange(): void {
   }
 }
 
-function createSettingsWindow(): void {
+function createSettingsWindow(pane?: string): void {
+  if (pane) settingsInitialPane = pane;
   if (settingsWindow && !settingsWindow.isDestroyed()) {
     settingsWindow.show();
     settingsWindow.focus();
@@ -388,18 +509,153 @@ function createSettingsWindow(): void {
     systemDark: nativeTheme.shouldUseDarkColors,
     iconDataUrl: settingsIconDataUrl,
     rendererScript,
+    darkIconDataUrl: readIconDataUrl("pi-logo-on-dark.svg"),
+    lightIconDataUrl: readIconDataUrl("pi-logo-on-light.svg"),
   });
   // 设置页按当前主题动态生成，写入 userData 后加载，避免改动打包产物里的静态文件。
   const htmlPath = path.join(app.getPath("userData"), "settings.html");
   fs.mkdirSync(path.dirname(htmlPath), { recursive: true });
   fs.writeFileSync(htmlPath, html, "utf8");
   settingsWindow.loadFile(htmlPath).then(() => {
+    // 带页签参数打开时直接切过去，例如从关于面板点「提示词增强」。
+    if (settingsInitialPane && settingsInitialPane !== "appearance") {
+      const pane = settingsInitialPane.replace(/[^a-z]/gi, "");
+      void settingsWindow?.webContents.executeJavaScript(
+        `document.querySelector('[data-pane="${pane}"]')?.click();`, true,
+      );
+    }
+    settingsInitialPane = "appearance";
     settingsWindow?.show();
     settingsWindow?.focus();
   }).catch((error) => {
     log(`Could not open settings window: ${error instanceof Error ? error.message : String(error)}`);
   });
   settingsWindow.on("closed", () => { settingsWindow = undefined; });
+}
+
+/** 创建（或复用）Token 用量统计窗口。 */
+function createUsageWindow(): void {
+  if (usageWindow && !usageWindow.isDestroyed()) {
+    usageWindow.show();
+    usageWindow.focus();
+    return;
+  }
+  const palette = getPalette(currentTheme, nativeTheme.shouldUseDarkColors);
+  const rendererScript = fs.readFileSync(appFilePath(path.join("build", "usage-renderer.js")), "utf8");
+
+  // 默认展示最近 30 天，与快捷按钮的默认口径保持一致。
+  const today = new Date();
+  const start = new Date(today);
+  start.setDate(start.getDate() - 29);
+  const isoDate = (date: Date) => toLocalDate(date.getTime());
+
+  const html = buildUsageHtml({
+    theme: palette.id,
+    systemDark: nativeTheme.shouldUseDarkColors,
+    iconDataUrl: "",
+    rendererScript,
+    defaultFrom: isoDate(start),
+    defaultTo: isoDate(today),
+  });
+
+  usageWindow = new BrowserWindow({
+    width: 980,
+    height: 760,
+    minWidth: 780,
+    minHeight: 560,
+    show: false,
+    title: "Token 用量统计",
+    icon: assetPath("pi-logo-adaptive.ico"),
+    backgroundColor: palette.background,
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: appFilePath(path.join("build", "preload.js")),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  usageWindow.setMenu(null);
+  usageWindow.setMenuBarVisibility(false);
+  usageWindow.webContents.setWindowOpenHandler(({ url }) => {
+    void shell.openExternal(url);
+    return { action: "deny" };
+  });
+  usageWindow.webContents.on("will-navigate", (event, url) => {
+    if (url.startsWith("file://")) return;
+    event.preventDefault();
+    void shell.openExternal(url);
+  });
+
+  const htmlPath = path.join(app.getPath("userData"), "usage.html");
+  fs.mkdirSync(path.dirname(htmlPath), { recursive: true });
+  fs.writeFileSync(htmlPath, html, "utf8");
+  usageWindow.loadFile(htmlPath).then(() => {
+    usageWindow?.show();
+    usageWindow?.focus();
+  }).catch((error) => {
+    log(`Could not open usage window: ${error instanceof Error ? error.message : String(error)}`);
+  });
+  usageWindow.on("closed", () => { usageWindow = undefined; });
+}
+
+/** 查询 pi-web 的运行中会话，供托盘角标与完成通知使用。 */
+async function fetchRunningSessions(): Promise<{ count: number; sessions: Array<{ id: string; name: string }> }> {
+  const port = manager?.getPort() || Number(process.env.PI_WEB_BOX_PORT) || 30141;
+  try {
+    const response = await net.fetch(`http://127.0.0.1:${port}/api/agent/running`);
+    if (!response.ok) return { count: 0, sessions: [] };
+    const data = (await response.json()) as { runningSessionIds?: unknown };
+    const ids = Array.isArray(data.runningSessionIds) ? data.runningSessionIds.filter((id): id is string => typeof id === "string") : [];
+    if (ids.length === 0) return { count: 0, sessions: [] };
+    // 会话名通过列表接口补齐，失败时用短 id 代替，不影响角标。
+    const names = new Map<string, string>();
+    try {
+      const listResponse = await net.fetch(`http://127.0.0.1:${port}/api/sessions`);
+      if (listResponse.ok) {
+        const listData = (await listResponse.json()) as { sessions?: Array<{ id?: unknown; name?: unknown }> };
+        for (const session of listData.sessions ?? []) {
+          if (typeof session.id === "string" && typeof session.name === "string") names.set(session.id, session.name);
+        }
+      }
+    } catch {
+      /* 列表取不到时宁缺勿错 */
+    }
+    return { count: ids.length, sessions: ids.map((id) => ({ id, name: names.get(id) || id.slice(0, 8) })) };
+  } catch {
+    // 服务未就绪时视为空闲，避免启动阶段误报。
+    return { count: 0, sessions: [] };
+  }
+}
+
+/** 启动运行状态轮询：驱动托盘角标与任务完成通知。 */
+function startRunningPoller(): void {
+  if (runningPoller) return;
+  runningPoller = setInterval(() => { void pollRunningState(); }, RUNNING_POLL_MS);
+}
+
+async function pollRunningState(): Promise<void> {
+  const { count, sessions } = await fetchRunningSessions();
+  if (!trayController) {
+    runningState = { runningCount: count, justFinished: false };
+    return;
+  }
+  const { justFinished } = trayController.updateRunningState(count, sessions);
+  runningState = { runningCount: count, justFinished };
+}
+
+/** 在主窗口内加载指定会话，供托盘菜单跳转使用。 */
+async function openSessionInWindow(sessionId: string): Promise<void> {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  showMainWindow();
+  try {
+    await mainWindow.webContents.executeJavaScript(
+      `window.location.href = window.location.origin + "/?session=" + encodeURIComponent(${JSON.stringify(sessionId)});`,
+      true,
+    );
+  } catch (error) {
+    log(`Could not open session from tray: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 async function startPiWeb(): Promise<void> {
@@ -444,9 +700,19 @@ async function startPiWeb(): Promise<void> {
 function createWindow(): void {
   // 任务栏和窗口标题栏统一使用高对比度图标，避免 Windows 深色任务栏中黑色 Pi 不可见。
   const icon = assetPath("pi-logo-adaptive.ico");
-  mainWindow = new BrowserWindow({
+  // 还原上次的窗口位置与尺寸，并确保窗口落在可见区域内。
+  const saved = settingsStore?.get().window ?? {
+    x: undefined,
+    y: undefined,
     width: 1440,
     height: 920,
+    maximized: false,
+  };
+  mainWindow = new BrowserWindow({
+    x: saved.x,
+    y: saved.y,
+    width: saved.width,
+    height: saved.height,
     minWidth: 960,
     minHeight: 640,
     show: false,
@@ -461,6 +727,20 @@ function createWindow(): void {
       sandbox: true,
     },
   });
+  if (saved.maximized) mainWindow.maximize();
+  // 位置可能来自已拔掉的显示器，这里校验一次并回退到居中。
+  ensureWindowOnScreen(mainWindow);
+  // 窗口尺寸与位置变化时延迟保存，避免拖动过程中频繁写文件。
+  let saveTimer: NodeJS.Timeout | undefined;
+  const scheduleSaveBounds = () => {
+    // 主进程没有 window 全局对象，定时器直接用 clearTimeout。
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => saveWindowBounds(), 600);
+  };
+  mainWindow.on("resize", scheduleSaveBounds);
+  mainWindow.on("move", scheduleSaveBounds);
+  mainWindow.on("maximize", scheduleSaveBounds);
+  mainWindow.on("unmaximize", scheduleSaveBounds);
   mainWindow.setMenu(null);
   mainWindow.setMenuBarVisibility(false);
   mainWindow.webContents.on("before-input-event", (event, input) => {
@@ -489,8 +769,10 @@ function createWindow(): void {
     if (isQuitting) return;
     if (settingsStore?.get().minimizeToTrayOnClose) {
       event.preventDefault();
+      saveWindowBounds();
       mainWindow?.hide();
-      ensureTray();
+      // 主窗口进托盘时一并收起子窗口，避免留下孤立的设置/统计窗口。
+      closeChildWindows();
       log("Main window hidden to tray.");
     }
   });
@@ -498,25 +780,78 @@ function createWindow(): void {
   void startPiWeb();
 }
 
-/** 托盘图标与菜单：提供显示主窗口和彻底退出的入口。 */
-function ensureTray(): void {
-  if (tray) return;
+/** 保存当前窗口的位置与尺寸（含最大化状态）。 */
+function saveWindowBounds(): void {
+  if (!mainWindow || mainWindow.isDestroyed() || !settingsStore) return;
   try {
-    tray = new Tray(assetPath("pi-logo-adaptive.ico"));
-    tray.setToolTip("Pi Web Box");
-    tray.setContextMenu(Menu.buildFromTemplate([
-      { label: "显示 Pi Web Box", click: () => showMainWindow() },
-      { label: "Box 设置", click: () => { showMainWindow(); createSettingsWindow(); } },
-      { type: "separator" },
-      { label: "退出", click: () => { isQuitting = true; app.quit(); } },
-    ]));
-    // 双击托盘图标直接回到主窗口，符合 Windows 使用习惯。
-    tray.on("double-click", () => showMainWindow());
-    log("Tray icon created.");
+    const saved = settingsStore.get().window;
+    const maximized = mainWindow.isMaximized();
+    // 最大化时窗口尺寸是屏幕尺寸，还原时会失效，
+    // 因此只记录标志位，位置与尺寸沿用上次保存的值。
+    const bounds = maximized ? saved : mainWindow.getNormalBounds();
+    settingsStore.saveWindowBounds({
+      x: maximized ? saved.x : bounds.x,
+      y: maximized ? saved.y : bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+      maximized,
+    });
   } catch (error) {
-    log(`Could not create tray icon: ${error instanceof Error ? error.message : String(error)}`);
-    tray = undefined;
+    log(`Could not save window bounds: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+/** 确保窗口在可见屏幕内，否则居中显示，避免窗口“跑出”屏幕。 */
+function ensureWindowOnScreen(targetWindow: BrowserWindow): void {
+  try {
+    const bounds = targetWindow.getBounds();
+    const displays = screen.getAllDisplays();
+    const visible = displays.some((display) => {
+      const area = display.workArea;
+      return (
+        bounds.x < area.x + area.width &&
+        bounds.x + bounds.width > area.x &&
+        bounds.y < area.y + area.height &&
+        bounds.y + bounds.height > area.y
+      );
+    });
+    if (!visible) targetWindow.center();
+  } catch {
+    // 屏幕信息取不到时不动窗口，交给系统默认行为。
+  }
+}
+
+/** 主窗口进托盘时收起子窗口。 */
+function closeChildWindows(): void {
+  if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.close();
+  if (usageWindow && !usageWindow.isDestroyed()) usageWindow.close();
+}
+
+/** 按设置开关托盘图标。 */
+function applyTrayVisibility(): void {
+  const visible = settingsStore?.get().showTrayIcon ?? true;
+  trayController?.setVisible(visible);
+}
+
+/** 创建托盘控制器。角标与通知由运行状态轮询驱动。 */
+function ensureTray(): void {
+  if (trayController) {
+    applyTrayVisibility();
+    return;
+  }
+  trayController = new TrayController(
+    trayIconPath(process.resourcesPath, app.isPackaged, app.getAppPath()),
+    log,
+    {
+      showMainWindow,
+      openSettings: () => createSettingsWindow(),
+      openUsage: () => createUsageWindow(),
+      quit: () => { isQuitting = true; app.quit(); },
+      recentSessions: async () => (await fetchRunningSessions()).sessions,
+      openSession: (id: string) => void openSessionInWindow(id),
+    },
+  );
+  applyTrayVisibility();
 }
 
 function showMainWindow(): void {
@@ -555,6 +890,9 @@ ipcMain.handle("pi-web-box:get-settings", () => getSettingsSnapshot());
 ipcMain.handle("pi-web-box:save-settings", async (_event, input: BoxSettingsInput): Promise<SaveSettingsResult> => {
   try {
     settingsStore?.save(input);
+    // 托盘开关与增强模型变更后立即生效，无需重启。
+    applyTrayVisibility();
+    void injectVersionPanel();
     broadcastSettingsChange();
     log("Settings saved.");
     return { ok: true, message: "已保存", snapshot: getSettingsSnapshot() };
@@ -566,6 +904,7 @@ ipcMain.handle("pi-web-box:save-settings", async (_event, input: BoxSettingsInpu
 ipcMain.handle("pi-web-box:reset-settings", async (): Promise<SaveSettingsResult> => {
   try {
     settingsStore?.reset();
+    applyTrayVisibility();
     broadcastSettingsChange();
     log("Settings reset to defaults.");
     return { ok: true, message: "已恢复默认设置", snapshot: getSettingsSnapshot() };
@@ -597,8 +936,73 @@ ipcMain.handle("pi-web-box:refresh-titlebar", async () => {
   log("Title bar appearance refreshed manually.");
 });
 
-ipcMain.handle("pi-web-box:open-settings", () => {
-  createSettingsWindow();
+ipcMain.handle("pi-web-box:open-settings", (_event, pane?: string) => {
+  createSettingsWindow(typeof pane === "string" ? pane : undefined);
+});
+
+ipcMain.handle("pi-web-box:open-usage", () => {
+  createUsageWindow();
+});
+
+// 用量统计查询：主进程直接读日志文件，渲染进程不接触文件系统。
+ipcMain.handle("pi-web-box:query-usage", async (_event, query: UsageQuery) => {
+  try {
+    const logFile = usageLogPath();
+    const records = readUsageRecords(logFile);
+    const range = resolveUsageRange(query);
+    // 按模型筛选时只对区间汇总生效，热力图仍展示全部模型的总量。
+    const filtered = query?.model
+      ? records.filter((record) => record.model === query.model)
+      : records;
+    const overview = buildUsageOverview(filtered, { from: range.from, to: range.to, logFile });
+    // 热力图始终基于全部记录，避免筛选模型后绿格子变得不可比。
+    if (query?.model) {
+      const full = buildUsageOverview(records, { from: range.from, to: range.to, logFile });
+      overview.heatmap = full.heatmap;
+      overview.thresholds = full.thresholds;
+    }
+    return { ok: true, overview };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+// 检测与一键安装 pi-usage-log 插件。
+ipcMain.handle("pi-web-box:check-usage-extension", () => usageExtensionInfo());
+
+ipcMain.handle("pi-web-box:install-usage-extension", async (): Promise<SaveSettingsResult> => {
+  const result = await installUsageLogExtension(process.resourcesPath, app.isPackaged, app.getAppPath());
+  if (result.ok) log(`Installed usage extension into ${piAgentDirectory()}.`);
+  else log(`Could not install usage extension: ${result.message}`);
+  return {
+    ok: result.ok,
+    message: result.message,
+    snapshot: result.ok ? getSettingsSnapshot() : undefined,
+  };
+});
+
+// 提示词增强：在主进程发起请求，API Key 不进入渲染进程。
+ipcMain.handle("pi-web-box:enhance-prompt", async (_event, request: EnhanceRequest): Promise<EnhanceResponse> => {
+  const store = settingsStore!;
+  const { provider, model } = store.get().enhance;
+  if (!provider || !model) {
+    return { ok: false, message: "请先在 Box 设置的「提示词增强」中选择模型。" };
+  }
+  const result = await enhancePrompt({
+    provider,
+    model,
+    scene: typeof request?.scene === "string" ? request.scene : "general",
+    draft: typeof request?.draft === "string" ? request.draft : "",
+  });
+  if (!result.ok) log(`Prompt enhancement failed: ${result.message}`);
+  return result.ok ? { ok: true, text: result.text } : { ok: false, message: result.message };
+});
+
+ipcMain.handle("pi-web-box:get-running-state", () => runningState);
+
+ipcMain.handle("pi-web-box:open-external", async (_event, url: string) => {
+  // 只放行 http/https，避免被页面利用去执行本地协议。
+  if (typeof url === "string" && /^https?:\/\//i.test(url)) await shell.openExternal(url);
 });
 
 // Pi Web 页面回传主题：同步 Windows 原生标题栏，让界面保持一体感。
@@ -646,7 +1050,9 @@ if (gotLock) {
     // 首次使用且存在环境变量配置时，把它们固化成设置文件，方便用户在界面里看到。
     if (!fs.existsSync(settingsStore.getFilePath())) applyEnvironmentBootstrap(settingsStore);
     createWindow();
+    ensureTray();
     await applySystemTheme();
+    startRunningPoller();
     nativeTheme.on("updated", () => {
       void applySystemTheme();
       applyTitleBarTheme();
@@ -662,8 +1068,15 @@ if (gotLock) {
   });
 
   app.on("before-quit", (event) => {
+    // 第一次会拦下来做清理，清理完用 app.exit 退出，避免再次进入这里。
     if (isQuitting) return;
     isQuitting = true;
+    if (runningPoller) {
+      clearInterval(runningPoller);
+      runningPoller = undefined;
+    }
+    trayController?.destroy();
+    saveWindowBounds();
     event.preventDefault();
     void (async () => {
       await manager?.close();

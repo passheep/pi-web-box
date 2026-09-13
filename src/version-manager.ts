@@ -3,6 +3,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
+import { findCommandOnPath, findExecutableOnPath } from "./executables.js";
 
 const execFileAsync = promisify(execFile);
 const CHECK_TIMEOUT_MS = 5_000;
@@ -60,12 +61,7 @@ function packagePathParts(packageName: string): string[] {
 }
 
 async function findCommand(commandName: string): Promise<string | undefined> {
-  try {
-    const result = await execFileAsync("where.exe", [`${commandName}.cmd`], { windowsHide: true });
-    return result.stdout.split(/\r?\n/).map((value) => value.trim()).find(Boolean);
-  } catch {
-    return undefined;
-  }
+  return findCommandOnPath(`${commandName}.cmd`) || findCommandOnPath(commandName);
 }
 
 async function findPackageJson(commandPath: string, packageName: string): Promise<string | undefined> {
@@ -109,11 +105,9 @@ async function fetchLatestVersion(packageName: string): Promise<string> {
 }
 
 async function findExecutable(fileName: string): Promise<string> {
-  try {
-    const result = await execFileAsync("where.exe", [fileName], { windowsHide: true });
-    const executable = result.stdout.split(/\r?\n/).map((value) => value.trim()).find(Boolean);
-    if (executable) return executable;
-  } catch { /* handled below */ }
+  // 直接扫描 PATH，避免在主进程里创建控制台子进程。
+  const executable = findExecutableOnPath([fileName]);
+  if (executable) return executable;
   throw new Error(`找不到 ${fileName}，无法自动更新。`);
 }
 

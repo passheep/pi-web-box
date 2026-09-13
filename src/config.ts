@@ -12,14 +12,35 @@ export type PiWebConfig = {
   nodePath: string;
 };
 
+// 提示词增强使用的模型。供应商与模型来自 pi 的 models.json。
+export type EnhanceConfig = {
+  // 留空表示未选择，此时增强功能不可用。
+  provider: string;
+  model: string;
+};
+
+// 窗口位置与尺寸记忆，退出时保存，下次启动还原。
+export type WindowBounds = {
+  x: number | undefined;
+  y: number | undefined;
+  width: number;
+  height: number;
+  maximized: boolean;
+};
+
 export type BoxSettings = {
-  // 关闭主窗口后是否留在托盘，默认开启。
+  // 关闭主窗口后是否留在托盘。
   minimizeToTrayOnClose: boolean;
+  // 是否在通知区域显示托盘图标。
+  showTrayIcon: boolean;
   piWeb: PiWebConfig;
+  enhance: EnhanceConfig;
+  window: WindowBounds;
 };
 
 export const DEFAULT_SETTINGS: BoxSettings = {
   minimizeToTrayOnClose: true,
+  showTrayIcon: true,
   piWeb: {
     port: "30141",
     hostname: "127.0.0.1",
@@ -27,6 +48,17 @@ export const DEFAULT_SETTINGS: BoxSettings = {
     password: "",
     commandPath: "",
     nodePath: "",
+  },
+  enhance: {
+    provider: "",
+    model: "",
+  },
+  window: {
+    x: undefined,
+    y: undefined,
+    width: 1440,
+    height: 920,
+    maximized: false,
   },
 };
 
@@ -82,6 +114,12 @@ function validateExecutablePath(value: string, label: string): SettingsValidatio
   return { ok: true };
 }
 
+/** 监听非回环地址意味着 Pi Web 会暴露到局域网，这里给出明确提示而不是拦截。 */
+export function isLoopbackHostname(hostname: string): boolean {
+  const value = hostname.trim().toLowerCase();
+  return !value || value === "127.0.0.1" || value === "localhost" || value === "::1";
+}
+
 export function validateSettings(settings: BoxSettings): SettingsValidation {
   const checks = [
     validatePort(settings.piWeb.port),
@@ -93,6 +131,10 @@ export function validateSettings(settings: BoxSettings): SettingsValidation {
   for (const check of checks) {
     if (!check.ok) return check;
   }
+  // 开放到局域网却没有密码时提示，避免误暴露。
+  if (!isLoopbackHostname(settings.piWeb.hostname) && !settings.piWeb.password) {
+    return { ok: false, message: "监听地址已开放到局域网，请同时设置访问密码。" };
+  }
   return { ok: true };
 }
 
@@ -103,12 +145,24 @@ export function validateSettings(settings: BoxSettings): SettingsValidation {
 export function normalizeSettings(raw: unknown): BoxSettings {
   const source = (raw && typeof raw === "object" ? raw : {}) as Partial<BoxSettings>;
   const piWeb = (source.piWeb && typeof source.piWeb === "object" ? source.piWeb : {}) as Partial<PiWebConfig>;
+  const enhance = (source.enhance && typeof source.enhance === "object" ? source.enhance : {}) as Partial<EnhanceConfig>;
+  const windowBounds = (source.window && typeof source.window === "object" ? source.window : {}) as Partial<WindowBounds>;
   const text = (value: unknown, fallback: string) => (typeof value === "string" ? value : fallback);
+  // 坐标允许为空（表示交给系统摆放），但必须是有限数字。
+  const coordinate = (value: unknown): number | undefined =>
+    typeof value === "number" && Number.isFinite(value) ? Math.round(value) : undefined;
+  const size = (value: unknown, fallback: number): number => {
+    const parsed = typeof value === "number" ? value : Number.NaN;
+    // 过小的尺寸会让窗口无法操作，这里做个下限保护。
+    return Number.isFinite(parsed) && parsed >= 640 ? Math.round(parsed) : fallback;
+  };
   return {
     minimizeToTrayOnClose:
       typeof source.minimizeToTrayOnClose === "boolean"
         ? source.minimizeToTrayOnClose
         : DEFAULT_SETTINGS.minimizeToTrayOnClose,
+    showTrayIcon:
+      typeof source.showTrayIcon === "boolean" ? source.showTrayIcon : DEFAULT_SETTINGS.showTrayIcon,
     piWeb: {
       port: text(piWeb.port, DEFAULT_SETTINGS.piWeb.port),
       hostname: text(piWeb.hostname, DEFAULT_SETTINGS.piWeb.hostname),
@@ -116,6 +170,17 @@ export function normalizeSettings(raw: unknown): BoxSettings {
       password: text(piWeb.password, DEFAULT_SETTINGS.piWeb.password),
       commandPath: text(piWeb.commandPath, DEFAULT_SETTINGS.piWeb.commandPath),
       nodePath: text(piWeb.nodePath, DEFAULT_SETTINGS.piWeb.nodePath),
+    },
+    enhance: {
+      provider: text(enhance.provider, DEFAULT_SETTINGS.enhance.provider),
+      model: text(enhance.model, DEFAULT_SETTINGS.enhance.model),
+    },
+    window: {
+      x: coordinate(windowBounds.x),
+      y: coordinate(windowBounds.y),
+      width: size(windowBounds.width, DEFAULT_SETTINGS.window.width),
+      height: size(windowBounds.height, DEFAULT_SETTINGS.window.height),
+      maximized: windowBounds.maximized === true,
     },
   };
 }
@@ -152,15 +217,31 @@ export class SettingsStore {
     const settings = normalizeSettings(raw);
     const validation = validateSettings(settings);
     if (!validation.ok) throw new Error(validation.message);
-    fs.mkdirSync(this.directory, { recursive: true });
-    fs.writeFileSync(this.file, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
-    this.cache = settings;
+    this.write(settings);
     return settings;
   }
 
-  /** 重置为默认设置，同时把设置文件写回默认值。 */
+  // 内部写入：跳过校验，用于保存窗口位置这类由程序产生的值。
+  private write(settings: BoxSettings): void {
+    fs.mkdirSync(this.directory, { recursive: true });
+    fs.writeFileSync(this.file, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+    this.cache = settings;
+  }
+
+  /** 只更新窗口位置与尺寸，校验只针对可编辑字段，避免窗口尺寸触发业务校验。 */
+  saveWindowBounds(bounds: WindowBounds): void {
+    this.write(normalizeSettings({ ...this.cache, window: bounds }));
+  }
+
+  /** 重置为默认设置，同时把设置文件写回默认值，并清掉记住的窗口位置。 */
   reset(): BoxSettings {
-    return this.save(DEFAULT_SETTINGS);
+    const defaults = normalizeSettings({
+      ...DEFAULT_SETTINGS,
+      // 重置时一并清掉提示词增强的模型选择，回到未选择状态。
+      enhance: { provider: "", model: "" },
+    });
+    this.write(defaults);
+    return defaults;
   }
 
   // 组装传给 pi-web 进程的环境变量，空值一律不设置，避免覆盖 pi-web 自身默认行为。

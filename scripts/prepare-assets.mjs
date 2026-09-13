@@ -59,7 +59,9 @@ await Promise.all([
   fs.copyFile(path.join(root, "src", "startup-renderer.js"), path.join(build, "startup-renderer.js")),
   fs.copyFile(path.join(root, "src", "error.html"), path.join(build, "error.html")),
   fs.copyFile(path.join(root, "src", "error-renderer.js"), path.join(build, "error-renderer.js")),
-  // Box 设置窗口的交互脚本由主进程读入后内联到动态页面，需要一并复制到 build。
+  // Box 设置窗口与用量统计窗口的交互脚本由主进程读入后内联到动态页面，
+  // 需要一并复制到 build。
   fs.copyFile(path.join(root, "src", "settings-renderer.js"), path.join(build, "settings-renderer.js")),
+  fs.copyFile(path.join(root, "src", "usage-renderer.js"), path.join(build, "usage-renderer.js")),
 ]);
 console.log(`Prepared adaptive theme icons and copied static pages to ${path.relative(root, build)}`);

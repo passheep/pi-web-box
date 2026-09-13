@@ -14,10 +14,15 @@ Double-click the portable EXE and it silently starts the `pi-web` command you al
 - **High-contrast icons** — the EXE, taskbar, tray, and desktop shortcut use a dark tile with a white Pi, visible in both light and dark Windows themes.
 - **Startup page** — shows the current step, a progress bar, and live npm/pnpm output instead of a terminal.
 - **Update check** — queries npm for `@earendil-works/pi-coding-agent` and `@agegr/pi-web` on every launch and offers to update them.
-- **About panel** — the floating button in the bottom-right corner shows the Pi, Pi Web, and Pi Web Box versions, links each one to its website, and opens the Box settings window.
-- **Automatic title bar theming** — Windows paints the native title bar with the current Pi Web theme background, so the frame blends into the page. Pi Web has five themes (Light, Dark, Mist, Rose, Pine); switching between them updates the title bar automatically.
-- **Box settings** — a settings window styled like Pi Web's own settings, split into **Appearance & behavior** and **Pi Web configuration**.
-- **Minimize to tray** — closing the window keeps Pi Web running in the notification area by default; it can be turned off in the settings.
+- **About panel** — the floating button in the bottom-right corner shows the Pi, Pi Web, and Pi Web Box versions, links each one to its website and repository, and opens the Box settings window, token statistics, and prompt-enhancement settings.
+- **Automatic title bar theming** — Windows paints the native title bar with the current Pi Web theme background, so the frame blends into the page. Pi Web has five themes (Light, Dark, Mist, Rose, Pine); switching between them updates the title bar automatically. The About panel and settings window follow the same palette.
+- **Token statistics** — a statistics window renders Pi's usage log as a GitHub-style green heatmap covering a full year (empty days still take their cell), plus today's and range totals, cost, and a per-model breakdown, filterable by date range and model. A one-click installer adds the companion `pi-usage-log` extension so Pi starts recording usage.
+- **Prompt enhancement** — an **Enhance** button next to the composer rewrites your draft through a model you already configured in Pi, with General, Coding, and Image scene presets. The result is shown side by side with the original and can be regenerated, accepted, or discarded.
+- **Back to bottom** — after scrolling up, a button fades in over the message list and shows a badge when new messages arrive; it fades out once you are back at the latest message.
+- **Tray badge and notifications** — while sessions are running, the tray icon gains a green dot and its tooltip reports how many sessions are busy; a notification is sent when a session goes from running back to idle.
+- **Box settings** — a settings window styled like Pi Web's own settings, split into **Appearance & behavior**, **Token statistics**, **Pi Web configuration**, **Prompt enhancement**, and **About**.
+- **Minimize to tray** — closing the window keeps Pi Web running in the notification area by default; it can be turned off in the settings, and the tray icon itself can be hidden separately.
+- **Window position memory** — the window size, position, and maximized state are restored on the next launch; a window that would land on a disconnected display is recentred instead.
 - **Pi Web launch options** — configure port, hostname, allowed hosts, password, and the `pi-web` / Node.js paths from the settings window, then restart to apply them.
 - **Config reset** — the startup page has a reset button that restores all Box settings and the launch command to automatic detection.
 - **External links** — features that open a new tab (for example "Full history") are handed to your default browser.
@@ -108,6 +113,16 @@ The following Pi Web options are available in **Box settings → Pi Web configur
 | `pi-web` path | Absolute path to `pi-web.cmd`, empty means auto-detect |
 | Node.js path | Absolute path to `node.exe`, empty means auto-detect |
 
+When the hostname is something other than `127.0.0.1`, the settings window also shows the LAN address other devices can use; on loopback it stays hidden.
+
+### Token statistics
+
+The statistics window reads Pi's usage log at `~/.pi/agent/analytics/usage.jsonl`. The heatmap always covers the last year (weeks start on Monday) and leaves empty cells for days without records, shading each day by its token usage. If the log does not exist yet, install the companion extension from **Box settings → Token statistics** and restart Pi Web Box.
+
+### Prompt enhancement
+
+Enhancement runs through a model you already configured in Pi, so pick a provider and model in **Box settings → Prompt enhancement** first. API keys are read only inside the Electron main process; they are never exposed to the page or written to the log.
+
 ## Notes
 
 Pi Web Box uses the same pi configuration, credentials, sessions, and project files as pi itself and never modifies them. Closing the window quits the app and stops only the Pi Web service it started; a service it detected and reused is left running.
@@ -115,9 +130,11 @@ Pi Web Box uses the same pi configuration, credentials, sessions, and project fi
 ## Development Layout
 
 ```text
-src/         Electron main process, preload, startup/error pages, version panel
+src/         Electron main process, preload, startup/error pages, injected panels
+src/*-renderer.js  Renderer scripts for the settings, usage, and error windows
+extensions/  Bundled pi-usage-log extension copied into the installer
 scripts/     Asset generation and portable build verification
-test/        node:test suites for process, version, and panel logic
+test/        node:test suites for usage, enhance, extension, and panel logic
 assets/      Pi logos (SVG, PNG, ICO) generated by scripts/prepare-assets.mjs
 ```
 

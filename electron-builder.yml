@@ -12,6 +12,14 @@ files:
 extraResources:
   - from: assets
     to: assets
+  # 内置 pi 扩展：用户可在 Box 设置里一键安装到 pi 的扩展目录，
+  # 用于记录 token 用量，使统计功能在任意机器上都能工作。
+  # 只随包发布运行所需文件，自带测试不进入安装包。
+  - from: extensions
+    to: extensions
+    filter:
+      - "**/*"
+      - "!**/*.test.ts"
 win:
   target:
     # portable：单文件便携版，双击即用，无需安装。

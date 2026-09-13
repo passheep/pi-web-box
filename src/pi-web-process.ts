@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
+import { findExecutableOnPath } from "./executables.js";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_PORT = 30141;
@@ -83,9 +84,10 @@ async function findCommand(env: Record<string, string | undefined> = process.env
   if (appData) candidates.push(path.join(appData, "npm", "pi-web.cmd"));
 
   try {
-    const result = await execFileAsync(process.platform === "win32" ? "where.exe" : "which", ["pi-web.cmd"], { windowsHide: true });
-    candidates.unshift(...result.stdout.split(/\r?\n/).map((value) => value.trim()).filter(Boolean));
-  } catch { /* fallback candidates below */ }
+    // 直接扫描 PATH 定位命令，不用 where/which，避免主进程被控制台子进程阻塞。
+    const found = findExecutableOnPath(["pi-web.cmd", "pi-web"], env);
+    if (found) candidates.unshift(found);
+  } catch { /* 探测失败时继续使用下面的候选路径 */ }
 
   for (const candidate of candidates) {
     if (!path.isAbsolute(candidate) || fs.existsSync(candidate)) return candidate;
@@ -103,10 +105,9 @@ async function findNodeExecutable(env: Record<string, string | undefined> = proc
   }
 
   try {
-    const result = await execFileAsync("where.exe", ["node.exe"], { windowsHide: true });
-    const node = result.stdout.split(/\r?\n/).map((value) => value.trim()).find(Boolean);
+    const node = findExecutableOnPath(["node.exe", "node"], env);
     if (node) return node;
-  } catch { /* handled below */ }
+  } catch { /* 探测失败时交给下面的全局查找 */ }
   throw new Error("找不到 Node.js。请安装 Node.js 22.19.0 或更高版本，并确保 node.exe 位于 PATH 中。");
 }
 
@@ -126,6 +127,7 @@ export class PiWebProcessManager {
   private owned = false;
   private stopping = false;
   private ready = false;
+  private currentPort = 0;
   private logStream: fs.WriteStream;
 
   constructor(
@@ -140,6 +142,11 @@ export class PiWebProcessManager {
   }
 
   getLogPath(): string { return this.logPath; }
+
+  /** 返回当前实际使用的端口，供主进程的 API 调用与内网地址展示使用。 */
+  getPort(): number {
+    return this.currentPort;
+  }
 
   private writeLog(message: string): void {
     const line = `[${new Date().toISOString()}] ${message}\n`;
@@ -157,6 +164,7 @@ export class PiWebProcessManager {
     }
 
     const port = await canConnect(preferred) ? await getFreePort() : preferred;
+    this.currentPort = port;
     // 合并 Box 设置与环境变量，探测命令、Node 与健康检查都用同一份配置。
     const env = { ...process.env, ...this.settingsEnvironment };
     const command = await findCommand(env);
