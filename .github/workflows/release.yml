@@ -73,9 +73,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # electron-builder 在极少数情况下会静默跳过上传而不报错，
-      # 这里用带 token 的 API 复查一次，缺资产时直接让流水线失败。
-      - name: 校验 Release 资产是否完整
+      # electron-builder 复用已有 release 时可能保留草稿状态（例如 tag 被重推后）。
+      # 这里统一确认一次：仍是草稿就改为正式发布，否则用户在外网看不到资产。
+      - name: 确保 Release 已正式发布
         if: always() && startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         run: |
@@ -86,6 +86,52 @@ jobs:
             Accept        = "application/vnd.github+json"
           }
           $release = Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag" -Headers $headers
+          if ($release.draft) {
+            Write-Host "检测到草稿 Release（id=$($release.id)），正在转为正式发布…"
+            $payload = @{ draft = $false; prerelease = $false } | ConvertTo-Json
+            Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases/$($release.id)" `
+              -Method Patch -Headers $headers -Body $payload -ContentType "application/json" | Out-Null
+            Write-Host "已转为正式发布"
+          } else {
+            Write-Host "Release 已是正式发布状态，无需处理"
+          }
+
+      # electron-builder 在少数情况下会静默跳过上传而不报错（如判定 release 已存在），
+      # 这里用带 token 的 API 复查一次，并把诊断写进 Step Summary 方便回溯。
+      - name: 校验 Release 资产是否完整
+        if: always() && startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $summaryPath = $env:GITHUB_STEP_SUMMARY
+          $headers = @{
+            Authorization = "Bearer ${{ secrets.GITHUB_TOKEN }}"
+            "User-Agent"  = "pi-web-box"
+            Accept        = "application/vnd.github+json"
+          }
+
+          # 仓库当前的 Release 快照，用于判断是否命中「已存在 release」分支。
+          "## 发布诊断：$tag" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+          $all = @(Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases?per_page=30" -Headers $headers)
+          "" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+          "### 仓库现有 Release" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+          foreach ($item in $all) {
+            $names = @($item.assets | ForEach-Object { $_.name }) -join ", "
+            "- tag=$($item.tag_name) draft=$($item.draft) published=$($item.published_at) assets=[$names]" |
+              Out-File -FilePath $summaryPath -Encoding utf8 -Append
+          }
+
+          "" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+          "### electron-builder 输出" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+          "```" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+          if (Test-Path publish.log) {
+            Get-Content publish.log | Select-Object -Last 60 | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+          } else {
+            "（未生成 publish.log）" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+          }
+          "```" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+
+          $release = Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases/tags/$tag" -Headers $headers
           Write-Host "Release: name=$($release.name) draft=$($release.draft) prerelease=$($release.prerelease)"
           $names = @($release.assets | ForEach-Object { $_.name })
           Write-Host "现有资产: $($names -join ', ')"
@@ -94,7 +140,13 @@ jobs:
           if (-not ($names -contains "Pi-Web-Box-Setup-$($release.tag_name.TrimStart('v')).exe")) {
             $missing += "安装包 EXE"
           }
-          if ($missing.Count -gt 0) { throw "Release 资产不完整，缺少：$($missing -join '、')" }
+          if ($names.Count -eq 0) { $missing += "全部资产（Release 为空）" }
+          if ($missing.Count -gt 0) {
+            $summaryText = "`n**校验失败，缺少：$($missing -join '、')**`n"
+            $summaryText | Out-File -FilePath $summaryPath -Encoding utf8 -Append
+            throw "Release 资产不完整，缺少：$($missing -join '、')"
+          }
+          "`n**校验通过**`n" | Out-File -FilePath $summaryPath -Encoding utf8 -Append
           Write-Host "Release 资产校验通过"
 
       # 无论成功失败都保留发布日志，便于回溯上传失败的具体原因。
