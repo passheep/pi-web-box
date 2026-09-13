@@ -87,8 +87,10 @@ jobs:
             "User-Agent"  = "pi-web-box"
             Accept        = "application/vnd.github+json"
           }
-          $all = @(Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases?per_page=30" -Headers $headers)
-          $target = $all | Where-Object { $_.tag_name -eq $tag -or $_.tag_name -eq $tag.TrimStart('v') } | Select-Object -First 1
+          $raw = Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases?per_page=30" -Headers $headers
+          $all = @()
+          $raw | ForEach-Object { $all += $_ }
+          $target = $all | Where-Object { $_.tag_name -eq $tag } | Select-Object -First 1
           if (-not $target) {
             Write-Host "::error title=ReleaseMissing::$tag 对应的 Release 不存在，无法发布"
             exit 0
@@ -123,7 +125,11 @@ jobs:
             Write-Host "::$level title=$title::$oneLine"
           }
 
-          $all = @(Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases?per_page=30" -Headers $headers)
+          # PowerShell 5.1 的 Invoke-RestMethod 会把 JSON 数组当成单个对象返回，
+          # 直接接 @() 会变成「数组套数组」，后续会把整个列表误认为一个 Release。
+          $raw = Invoke-RestMethod "https://api.github.com/repos/${{ github.repository }}/releases?per_page=30" -Headers $headers
+          $all = @()
+          $raw | ForEach-Object { $all += $_ }
           $snapshot = ($all | ForEach-Object {
             $n = @($_.assets | ForEach-Object { $_.name }) -join ","
             "tag=$($_.tag_name) draft=$($_.draft) pub=$($_.published_at) assets[$n]"
@@ -138,7 +144,7 @@ jobs:
           }
 
           try {
-            $mine = $all | Where-Object { $_.tag_name -eq $tag -or $_.tag_name -eq $tag.TrimStart('v') } | Select-Object -First 1
+            $mine = $all | Where-Object { $_.tag_name -eq $tag } | Select-Object -First 1
             if (-not $mine) { throw "列表中没有任何 $tag 的 Release" }
             $release = $mine
           } catch {
