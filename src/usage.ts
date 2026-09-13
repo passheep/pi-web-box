@@ -30,6 +30,12 @@ export type UsageModelSummary = {
   totalTokens: number;
   cost: number;
   requests: number;
+  // 模型维度的分项用量，供明细表展示输入/输出/命中与命中率。
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cacheHitRate: number;
 };
 
 export type UsageSummary = {
@@ -170,10 +176,17 @@ export function summarizeUsage(records: UsageRecord[], from: string, to: string)
     summary.requests += 1;
 
     const modelKey = record.model || "未识别";
-    const modelEntry = models.get(modelKey) ?? { model: modelKey, totalTokens: 0, cost: 0, requests: 0 };
+    const modelEntry = models.get(modelKey) ?? {
+      model: modelKey, totalTokens: 0, cost: 0, requests: 0,
+      input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cacheHitRate: 0,
+    };
     modelEntry.totalTokens += record.totalTokens;
     modelEntry.cost += record.cost;
     modelEntry.requests += 1;
+    modelEntry.input += record.input;
+    modelEntry.output += record.output;
+    modelEntry.cacheRead += record.cacheRead;
+    modelEntry.cacheWrite += record.cacheWrite;
     models.set(modelKey, modelEntry);
 
     const dayEntry = days.get(date) ?? { date, totalTokens: 0, cost: 0, requests: 0 };
@@ -186,6 +199,11 @@ export function summarizeUsage(records: UsageRecord[], from: string, to: string)
   // 缓存命中率的分母用输入侧总量，与常见口径一致。
   const inputSide = summary.input + summary.cacheRead + summary.cacheWrite;
   summary.cacheHitRate = inputSide > 0 ? summary.cacheRead / inputSide : 0;
+  // 每个模型单独算一次命中率，口径与总量保持一致。
+  for (const entry of models.values()) {
+    const modelInputSide = entry.input + entry.cacheRead + entry.cacheWrite;
+    entry.cacheHitRate = modelInputSide > 0 ? entry.cacheRead / modelInputSide : 0;
+  }
   summary.byModel = [...models.values()].sort((left, right) => right.totalTokens - left.totalTokens);
   summary.byDay = [...days.values()].sort((left, right) => left.date.localeCompare(right.date));
   return summary;

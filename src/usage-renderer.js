@@ -4,11 +4,11 @@
 const api = window.piWebBox;
 
 const el = {
-  subtitle: document.getElementById("subtitle"),
-  todayTokens: document.getElementById("todayTokens"),
-  todayRequests: document.getElementById("todayRequests"),
-  rangeTokens: document.getElementById("rangeTokens"),
-  rangeCost: document.getElementById("rangeCost"),
+  sumTotal: document.getElementById("sumTotal"),
+  sumInput: document.getElementById("sumInput"),
+  sumOutput: document.getElementById("sumOutput"),
+  sumCache: document.getElementById("sumCache"),
+  sumHitRate: document.getElementById("sumHitRate"),
   from: document.getElementById("from"),
   to: document.getElementById("to"),
   model: document.getElementById("model"),
@@ -28,28 +28,30 @@ function formatTokens(value) {
   return String(n);
 }
 
-function formatCost(value) {
-  const n = Number(value) || 0;
-  if (n === 0) return "$0";
-  if (n < 0.01) return `$${n.toFixed(4)}`;
-  return `$${n.toFixed(2)}`;
-}
-
 function formatNumber(value) {
   return (Number(value) || 0).toLocaleString("zh-CN");
 }
 
-// ── 概览卡片 ──
+// ── 概览卡片：全部跟随当前筛选区间 ──
 function renderSummary(overview) {
-  const today = overview.today || {};
   const range = overview.range || {};
-  el.todayTokens.innerHTML = `${formatTokens(today.totalTokens)}<span class="u">token</span>`;
-  el.todayRequests.textContent = formatNumber(today.requests);
-  el.rangeTokens.innerHTML = `${formatTokens(range.totalTokens)}<span class="u">token</span>`;
-  el.rangeCost.textContent = formatCost(range.cost);
+  const total = Number(range.totalTokens) || 0;
+  const input = Number(range.input) || 0;
+  const output = Number(range.output) || 0;
+  const cacheRead = Number(range.cacheRead) || 0;
 
-  const latest = overview.lastRecordAt ? new Date(overview.lastRecordAt).toLocaleString("zh-CN") : "无记录";
-  el.subtitle.textContent = `数据来自 pi 的用量日志 · 最近记录：${latest}`;
+  el.sumTotal.innerHTML = `${formatTokens(total)}<span class="u">token</span>`;
+  el.sumInput.innerHTML = `${formatTokens(input)}<span class="u">token</span>`;
+  el.sumOutput.innerHTML = `${formatTokens(output)}<span class="u">token</span>`;
+  el.sumCache.innerHTML = `${formatTokens(cacheRead)}<span class="u">token</span>`;
+
+  // 命中率直接取后端算好的值；缺字段时按 缓存读 / (输入 + 缓存读写) 兜底。
+  const rate = Number.isFinite(range.cacheHitRate)
+    ? range.cacheHitRate
+    : (input + cacheRead + (Number(range.cacheWrite) || 0)) > 0
+      ? cacheRead / (input + cacheRead + (Number(range.cacheWrite) || 0))
+      : 0;
+  el.sumHitRate.textContent = `${(rate * 100).toFixed(1)}%`;
 }
 
 // ── 热力图：按周分列，每列 7 天 ──
@@ -82,7 +84,6 @@ function renderHeatmap(overview) {
         cell.dataset.level = String(cellData.level);
         cell.dataset.date = cellData.date;
         cell.dataset.tokens = String(cellData.totalTokens);
-        cell.dataset.cost = String(cellData.cost);
         cell.dataset.requests = String(cellData.requests);
       }
       column.appendChild(cell);
@@ -90,35 +91,44 @@ function renderHeatmap(overview) {
     el.heat.appendChild(column);
   }
 
-  // 月份标签：在每月第一列上方标注月份。
+  // 月份标签：按月份分组，每组的宽度等于它横跨的周数，
+  // 这样标签能自然展开，不会因格子只有 11px 宽而被截断。
   let lastMonth = "";
   for (let week = 0; week < weekCount; week += 1) {
-    const span = document.createElement("span");
-    const index = week * 7;
-    const date = cells[Math.min(index, cells.length - 1)];
+    const date = cells[Math.min(week * 7, cells.length - 1)];
     const month = date ? date.date.slice(0, 7) : "";
-    const monthNumber = date ? String(Number(date.date.slice(5, 7))) : "";
     if (month && month !== lastMonth) {
-      span.textContent = `${monthNumber}月`;
+      // 先算出这个月会占多少列，再把标签的宽度设为对应像素。
+      let spanWeeks = 1;
+      for (let next = week + 1; next < weekCount; next += 1) {
+        const nextDate = cells[Math.min(next * 7, cells.length - 1)];
+        if (!nextDate || nextDate.date.slice(0, 7) !== month) break;
+        spanWeeks += 1;
+      }
+      const span = document.createElement("span");
+      span.textContent = `${Number(date.date.slice(5, 7))}月`;
+      // 11px 格子 + 3px 间距；宽度取满，文字才不会溢出被裁。
+      span.style.width = `${spanWeeks * 11 + (spanWeeks - 1) * 3}px`;
+      // 最后一个月往往只剩一两列，宽度不够显示完整文字，这里允许它自然撑开。
+      if (week + spanWeeks >= weekCount) span.style.minWidth = "max-content";
+      el.heatMonths.appendChild(span);
       lastMonth = month;
     }
-    el.heatMonths.appendChild(span);
   }
 
   const withData = cells.filter((cell) => cell.totalTokens > 0).length;
   el.heatRange.textContent = `${cells[0].date} ~ ${cells[cells.length - 1].date} · ${withData} 天有记录`;
 }
 
-// 悬浮提示：显示日期、用量、花费与请求数。
+// 悬浮提示：显示日期、用量与请求数。
 function bindTooltip() {
   el.heat.addEventListener("mouseover", (event) => {
     const cell = event.target.closest(".cell");
     if (!cell || cell.classList.contains("future")) return;
     const tokens = Number(cell.dataset.tokens) || 0;
-    const cost = Number(cell.dataset.cost) || 0;
     const requests = Number(cell.dataset.requests) || 0;
     el.tip.innerHTML = tokens > 0
-      ? `<b>${cell.dataset.date}</b><br>${formatNumber(tokens)} token · ${formatCost(cost)}<br>${requests} 次请求`
+      ? `<b>${cell.dataset.date}</b><br>${formatNumber(tokens)} token<br>${requests} 次请求`
       : `<b>${cell.dataset.date}</b><br>无记录`;
     el.tip.classList.add("on");
   });
@@ -139,20 +149,26 @@ function bindTooltip() {
 function renderModels(range) {
   const rows = range.byModel || [];
   if (!rows.length) {
-    el.modelRows.innerHTML = '<tr><td colspan="5" class="empty">该区间没有数据</td></tr>';
+    el.modelRows.innerHTML = '<tr><td colspan="8" class="empty">该区间没有数据</td></tr>';
     return;
   }
-  const max = Math.max(...rows.map((row) => row.totalTokens), 1);
+  const sum = rows.reduce((total, row) => total + (Number(row.totalTokens) || 0), 0) || 1;
   el.modelRows.innerHTML = rows
-    .map(
-      (row) => `<tr>
+    .map((row) => {
+      const tokens = Number(row.totalTokens) || 0;
+      const percent = (tokens / sum) * 100;
+      const hitRate = Number(row.cacheHitRate) || 0;
+      return `<tr>
         <td title="${row.model}">${row.model}</td>
-        <td class="num">${formatNumber(row.totalTokens)}</td>
+        <td class="num">${formatNumber(row.input)}</td>
+        <td class="num">${formatNumber(row.output)}</td>
+        <td class="num">${formatNumber(row.cacheRead)}</td>
+        <td class="num">${(hitRate * 100).toFixed(1)}%</td>
+        <td class="num">${formatNumber(tokens)}</td>
         <td class="num">${formatNumber(row.requests)}</td>
-        <td class="num">${formatCost(row.cost)}</td>
-        <td><div class="bar" style="width:${Math.max(2, Math.round((row.totalTokens / max) * 100))}%"></div></td>
-      </tr>`,
-    )
+        <td class="num share">${percent.toFixed(1)}%</td>
+      </tr>`;
+    })
     .join("");
 }
 
@@ -170,6 +186,8 @@ function fillModelOptions(overview) {
     el.model.appendChild(option);
   }
   if (current && names.has(current)) el.model.value = current;
+  // 模型名变长时查询行会变宽，重新量一次。
+  setTimeout(fitWindowToContent, 30);
 }
 
 async function load(options) {
@@ -182,7 +200,6 @@ async function load(options) {
   });
   el.apply.disabled = false;
   if (!result || !result.ok) {
-    el.subtitle.textContent = result?.message || "读取用量数据失败。";
     return;
   }
   const overview = result.overview;
@@ -201,16 +218,33 @@ async function load(options) {
   }
 }
 
-// 快捷区间按钮
+// 快捷区间按钮：今天 / 昨天按单日，其余按最近 N 天。
 for (const button of document.querySelectorAll(".quick button")) {
   button.addEventListener("click", () => {
-    const days = Number(button.dataset.days) || 30;
-    const to = new Date();
-    const from = new Date();
-    from.setDate(from.getDate() - (days - 1));
     const iso = (date) => date.toLocaleDateString("sv-SE");
+    const now = new Date();
+    let from;
+    let to;
+    if (button.dataset.range === "today") {
+      from = now;
+      to = now;
+    } else if (button.dataset.range === "yesterday") {
+      const yesterday = new Date(now);
+      yesterday.setDate(yesterday.getDate() - 1);
+      from = yesterday;
+      to = yesterday;
+    } else {
+      const days = Number(button.dataset.days) || 30;
+      from = new Date(now);
+      from.setDate(from.getDate() - (days - 1));
+      to = now;
+    }
     el.from.value = iso(from);
     el.to.value = iso(to);
+    // 标记当前选中的快捷按钮，方便看出当前口径。
+    for (const item of document.querySelectorAll(".quick button")) {
+      item.classList.toggle("active", item === button);
+    }
     void load({ includeHeatmap: false });
   });
 }
@@ -218,8 +252,43 @@ for (const button of document.querySelectorAll(".quick button")) {
 el.apply.addEventListener("click", () => void load({ includeHeatmap: false }));
 el.model.addEventListener("change", () => void load({ includeHeatmap: false }));
 
+// 默认口径是今天，打开时就把对应按钮标为选中。
+for (const button of document.querySelectorAll(".quick button")) {
+  const iso = (date) => date.toLocaleDateString("sv-SE");
+  const now = new Date();
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  const isToday = button.dataset.range === "today" && el.from.value === iso(now) && el.to.value === iso(now);
+  const isYesterday = button.dataset.range === "yesterday" && el.from.value === iso(yesterday) && el.to.value === iso(yesterday);
+  if (isToday || isYesterday) button.classList.add("active");
+}
+
 bindTooltip();
 void load({ includeHeatmap: true });
+
+// 加载后按实际内容宽度微调一次窗口：不同 DPI/字体下查询条件行的
+// 宽度会有差异，固定值容易让筛选控件折行。
+let lastFitWidth = 0;
+function fitWindowToContent() {
+  const filters = document.querySelector(".filters");
+  if (!filters) return;
+  // 量出“不折行”所需的真实宽度：临时放宽到 max-content 再取实际值。
+  const previousWidth = filters.style.width;
+  filters.style.width = "max-content";
+  const needed = Math.ceil(filters.getBoundingClientRect().width) + 40;
+  filters.style.width = previousWidth;
+  // 同一个宽度只上报一次，避免重复设置尺寸引起抖动。
+  if (Math.abs(needed - lastFitWidth) < 4) return;
+  lastFitWidth = needed;
+  try {
+    void window.piWebBox?.fitUsageWindow?.(needed);
+  } catch (error) {
+    void error;
+  }
+}
+
+window.addEventListener("load", () => setTimeout(fitWindowToContent, 50));
+setTimeout(fitWindowToContent, 200);
 
 // 主题变化时同步窗口配色。
 api.onSettingsTheme(({ palette }) => {
@@ -230,5 +299,9 @@ api.onSettingsTheme(({ palette }) => {
   root.style.setProperty("--text", palette.text);
   root.style.setProperty("--text-muted", palette.textMuted);
   root.style.setProperty("--accent", palette.accent);
+  // 标题栏底色与主窗口一致，取工具栏区域的面板色。
+  root.style.setProperty("--titlebar-bg", palette.panel);
   root.dataset.theme = palette.id;
+  // 自绘标题栏的图标也要跟着主题切。
+  window.__piWebBoxSetTitleBarIcon?.(palette.id === "dark" || palette.id === "pine");
 });

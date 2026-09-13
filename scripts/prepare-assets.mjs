@@ -6,6 +6,7 @@ import sharp from "sharp";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const assets = path.join(root, "assets");
 const sourceSvg = path.join(assets, "pi-logo-on-light.svg");
+const sourceDarkSvg = path.join(assets, "pi-logo-on-dark.svg");
 
 function createIco(pngData) {
   // Windows ICO 可以直接包含 PNG 数据，保持图标边缘清晰。
@@ -27,20 +28,22 @@ function createIco(pngData) {
 }
 
 async function writeIcon(name, svgContent) {
-  const svgPath = path.join(assets, `${name}.svg`);
   const pngPath = path.join(assets, `${name}.png`);
   const icoPath = path.join(assets, `${name}.ico`);
   const pngData = await sharp(Buffer.from(svgContent)).resize(256, 256).png().toBuffer();
+  // 只生成 PNG/ICO 衍生图标，不再回写 SVG 源文件。
   await Promise.all([
-    fs.writeFile(svgPath, svgContent),
     fs.writeFile(pngPath, pngData),
     fs.writeFile(icoPath, createIco(pngData)),
   ]);
 }
 
 await fs.mkdir(assets, { recursive: true });
+// 深浅两版 logo 由设计稿提供，直接使用，不再从浅色版反向替换颜色，
+// 避免每次构建都把源文件覆盖回去。
 const lightSvg = await fs.readFile(sourceSvg, "utf8");
-const darkSvg = lightSvg.replaceAll("#09090b", "#ffffff");
+const darkSvg = await fs.readFile(sourceDarkSvg, "utf8");
+// 任务栏图标用深色圆角底 + 白色 Pi，在深浅任务栏下都能看清。
 const adaptiveSvg = darkSvg.replace(
   /(<svg[^>]*>)/,
   '$1\n  <rect x="56" y="56" width="688" height="688" rx="150" fill="#18181b" stroke="#3f3f46" stroke-width="20"/>',

@@ -44,6 +44,14 @@ contextBridge.exposeInMainWorld("piWebBox", {
 
   // ── 用量统计窗口 ──
   queryUsage: (query: UsageQuery) => ipcRenderer.invoke("pi-web-box:query-usage", query),
+  // 统计窗口宽度固定，但需按实际字体/DPI 微调，避免查询条件行折行。
+  fitUsageWindow: (width: number) => ipcRenderer.invoke("pi-web-box:fit-usage-window", width),
+
+  // ── 自绘标题栏 ──
+  titleBarMinimize: () => ipcRenderer.invoke("pi-web-box:titlebar-minimize"),
+  titleBarClose: () => ipcRenderer.invoke("pi-web-box:titlebar-close"),
+  // 主窗口的标题栏额外提供最大化/还原。
+  titleBarToggleMaximize: () => ipcRenderer.invoke("pi-web-box:titlebar-toggle-maximize"),
 
   // ── Pi Web 页面内注入脚本使用 ──
   openSettings: (pane?: string) => ipcRenderer.invoke("pi-web-box:open-settings", pane),

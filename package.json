@@ -1,7 +1,7 @@
 {
   "name": "pi-web-box",
   "productName": "Pi Web Box",
-  "version": "0.6.0",
+  "version": "0.6.2",
   "private": true,
   "description": "A quiet Windows desktop window for Pi Web",
   "author": "Pi Web Box",

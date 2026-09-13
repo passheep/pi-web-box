@@ -1,11 +1,14 @@
 import { THEME_PALETTES, type ThemePalette } from "./themes.js";
 import type { UsageOverview, UsageSummary } from "./usage.js";
+import { buildTitleBarHtml, TITLE_BAR_CSS, TITLE_BAR_SCRIPT } from "./titlebar-view.js";
 
 export type UsageViewData = {
   theme: string;
   systemDark: boolean;
-  iconDataUrl: string;
   rendererScript: string;
+  // 品牌图标（深浅两版），用于自绘标题栏。
+  darkIconDataUrl: string;
+  lightIconDataUrl: string;
   // 首次打开的默认查询区间。
   defaultFrom: string;
   defaultTo: string;
@@ -28,22 +31,28 @@ const BASE_CSS = `
     font-size: 14px;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; color: var(--text); background: var(--bg); }
-  .page { padding: 18px 20px 22px; }
+  /* 自绘标题栏 + 可滚动内容区，整体高度锁定在窗口内。 */
+  body { margin: 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; color: var(--text); background: var(--bg); }
+  /* 隐藏滚动条但保留滚动能力：内容超长时仍可用滚轮/触控板滚动。 */
+  body::-webkit-scrollbar, .page::-webkit-scrollbar, .heat-scroll::-webkit-scrollbar { width: 0; height: 0; }
+  body, .page, .heat-scroll { scrollbar-width: none; -ms-overflow-style: none; }
+  .page { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 20px 22px; }
   h1 { font-size: 16px; font-weight: 650; margin: 0 0 3px; }
   .desc { margin: 0 0 14px; font-size: 12.5px; color: var(--text-muted); }
 
-  /* 概览卡片 */
-  .cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 16px; }
+  /* 概览卡片：数值全部跟随筛选区间，不再区分今日/区间。 */
+  .cards { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 16px; }
   .card { border: 1px solid var(--border); border-radius: 10px; padding: 11px 13px; background: var(--bg-panel); }
   .card .k { font-size: 11.5px; color: var(--text-muted); }
   .card .v { margin-top: 4px; font-size: 19px; font-weight: 650; font-variant-numeric: tabular-nums; }
   .card .u { margin-left: 3px; font-size: 11.5px; font-weight: 400; color: var(--text-muted); }
 
-  /* 筛选栏 */
-  .filters { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-panel); }
-  .filters label { font-size: 12.5px; color: var(--text-muted); }
+  /* 筛选栏：不换行，窗口宽度按这一行的实际需求确定。 */
+  .filters { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; margin-bottom: 14px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-panel); white-space: nowrap; }
+  .filters label { font-size: 12.5px; color: var(--text-muted); flex: none; }
   input[type="date"], select { padding: 6px 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); color: var(--text); font: inherit; font-size: 12.5px; }
+  input[type="date"] { flex: none; }
+  #model { flex: 1; min-width: 120px; }
   input[type="date"]:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
   button.btn { padding: 6px 13px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); color: var(--text); font: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer; }
   button.btn:hover { background: var(--bg-hover); }
@@ -52,12 +61,17 @@ const BASE_CSS = `
   .quick { display: flex; gap: 6px; }
   .quick button { padding: 4px 9px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text-muted); font: inherit; font-size: 11.5px; cursor: pointer; }
   .quick button:hover { background: var(--bg-hover); color: var(--text); }
+  .quick button.active { background: var(--accent); border-color: var(--accent); color: var(--accent-contrast); }
 
   /* 热力图 */
   .section { margin-bottom: 16px; }
   .section > h2 { font-size: 13px; font-weight: 650; margin: 0 0 8px; }
-  .heat-wrap { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--bg-panel); overflow-x: auto; }
-  .heat { display: flex; gap: 3px; }
+  /* 灰框不裁剪内容，否则最右侧的月份标签会被切掉。 */
+  .heat-wrap { border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--bg-panel); overflow: visible; }
+  /* 格子区宽度由周数决定，容器只负责裁剪，避免超出灰边框。 */
+  .heat { display: flex; gap: 3px; width: max-content; }
+  /* 格子区与月份标签共用同一容器宽度，最后一列标签才不会被裁。 */
+  .heat-scroll { overflow: visible; }
   .heat .week { display: flex; flex-direction: column; gap: 3px; }
   .heat .cell { width: 11px; height: 11px; border-radius: 2.5px; background: var(--heat-0); outline: 1px solid var(--heat-outline); outline-offset: -1px; }
   .heat .cell[data-level="1"] { background: ${HEAT_COLORS[1]}; }
@@ -69,11 +83,20 @@ const BASE_CSS = `
   .heat-legend { display: flex; align-items: center; justify-content: space-between; margin-top: 9px; font-size: 11.5px; color: var(--text-muted); }
   .heat-legend .scale { display: flex; align-items: center; gap: 4px; }
   .heat-legend .scale i { width: 11px; height: 11px; border-radius: 2.5px; display: block; }
-  .heat-months { display: flex; gap: 3px; margin-bottom: 4px; font-size: 11px; color: var(--text-muted); }
-  .heat-months span { width: 11px; overflow: visible; white-space: nowrap; }
+  /* 月份标签与星期标签各占一行，两者高度一致才能让下面的格子横向对齐。 */
+  /* 月份标签：宽度由脚本按横跨的周数写入，文字不换行。
+     最后一个标签常常只剩一列宽，允许它溢出显示完整月份。 */
+  .heat-months { display: flex; gap: 3px; height: 15px; margin: 0 0 4px; font-size: 11px; line-height: 15px; color: var(--text-muted); }
+  .heat-months span { flex: none; overflow: visible; white-space: nowrap; }
+  .heat-months span:last-child { position: relative; z-index: 1; }
   .heat-body { display: flex; gap: 6px; }
+  /* 星期标签：与格子行严格对齐。
+     右侧首个格子行的偏移是 15px（月份行高）+ 4px（下边距）= 19px；
+     左侧 spacer 与首个标签之间还有 3px 的 flex gap，
+     所以 spacer 高度取 16px，两者相加正好也是 19px。 */
   .heat-weekdays { display: flex; flex-direction: column; gap: 3px; font-size: 10px; color: var(--text-muted); }
-  .heat-weekdays span { height: 11px; line-height: 11px; }
+  .heat-weekdays .spacer { height: 16px; margin: 0; flex: none; }
+  .heat-weekdays span.day { height: 11px; line-height: 11px; flex: none; }
 
   /* 模型明细 */
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
@@ -82,7 +105,8 @@ const BASE_CSS = `
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-family: Consolas, ui-monospace, monospace; }
   tbody tr:last-child td { border-bottom: 0; }
   .empty { padding: 18px; text-align: center; font-size: 12.5px; color: var(--text-muted); }
-  .bar { height: 6px; border-radius: 3px; background: var(--accent); opacity: .75; min-width: 2px; }
+  /* 占比只用百分比文字展示。 */
+  .share { font-variant-numeric: tabular-nums; font-family: Consolas, ui-monospace, monospace; color: var(--text-muted); }
 
   /* 悬浮提示 */
   #tip { position: fixed; z-index: 2147483647; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font-size: 12px; line-height: 1.5; box-shadow: 0 6px 22px rgba(0,0,0,.22); pointer-events: none; opacity: 0; transition: opacity 120ms ease; white-space: nowrap; }
@@ -99,6 +123,8 @@ export function buildUsageHtml(data: UsageViewData): string {
   const themeVars = `
     --bg: ${palette.background};
     --bg-panel: ${palette.panel};
+    /* 自绘标题栏底色：与 pi-web 顶部工具栏同色 */
+    --titlebar-bg: ${palette.panel};
     --bg-hover: ${mix(palette.panel, palette.text, 0.06)};
     --border: ${palette.border};
     --text: ${palette.text};
@@ -119,21 +145,33 @@ export function buildUsageHtml(data: UsageViewData): string {
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'unsafe-inline';" />
   <title>Token 用量统计</title>
-  <style>:root {${themeVars}}${BASE_CSS}</style>
+  <style>:root {${themeVars}}${TITLE_BAR_CSS}${BASE_CSS}</style>
 </head>
 <body>
+  ${buildTitleBarHtml({
+    title: "Token 用量统计",
+    iconDataUrl: isLight(palette.background) ? data.lightIconDataUrl : data.darkIconDataUrl,
+  })}
   <div class="page">
     <h1>Token 用量统计</h1>
-    <p class="desc" id="subtitle">数据来自 pi 的用量日志，统计范围可自定义。</p>
 
     <div class="cards">
-      <div class="card"><div class="k">今日 Token</div><div class="v" id="todayTokens">—</div></div>
-      <div class="card"><div class="k">今日请求</div><div class="v" id="todayRequests">—</div></div>
-      <div class="card"><div class="k">区间 Token</div><div class="v" id="rangeTokens">—</div></div>
-      <div class="card"><div class="k">区间花费</div><div class="v" id="rangeCost">—</div></div>
+      <div class="card"><div class="k">总 Token</div><div class="v" id="sumTotal">—</div></div>
+      <div class="card"><div class="k">输入 Token</div><div class="v" id="sumInput">—</div></div>
+      <div class="card"><div class="k">输出 Token</div><div class="v" id="sumOutput">—</div></div>
+      <div class="card"><div class="k">缓存命中 Token</div><div class="v" id="sumCache">—</div></div>
+      <div class="card"><div class="k">缓存命中率</div><div class="v" id="sumHitRate">—</div></div>
     </div>
 
     <div class="filters">
+      <span class="quick">
+        <button type="button" data-range="today">今天</button>
+        <button type="button" data-range="yesterday">昨天</button>
+        <button type="button" data-days="7">7 天</button>
+        <button type="button" data-days="30">30 天</button>
+        <button type="button" data-days="90">90 天</button>
+        <button type="button" data-days="365">一年</button>
+      </span>
       <label for="from">起止</label>
       <input type="date" id="from" value="${escapeAttr(data.defaultFrom)}" />
       <span style="color:var(--text-muted)">~</span>
@@ -141,20 +179,36 @@ export function buildUsageHtml(data: UsageViewData): string {
       <label for="model">模型</label>
       <select id="model"><option value="">全部模型</option></select>
       <button class="btn primary" type="button" id="apply">查询</button>
-      <span class="quick">
-        <button type="button" data-days="7">7 天</button>
-        <button type="button" data-days="30">30 天</button>
-        <button type="button" data-days="90">90 天</button>
-        <button type="button" data-days="365">一年</button>
-      </span>
+    </div>
+
+    <div class="section">
+      <h2>模型明细</h2>
+      <div style="border:1px solid var(--border);border-radius:10px;overflow:hidden">
+        <table>
+          <thead><tr>
+            <th>模型</th>
+            <th class="num">输入 token</th>
+            <th class="num">输出 token</th>
+            <th class="num">命中 token</th>
+            <th class="num">命中率</th>
+            <th class="num">合计 token</th>
+            <th class="num">请求</th>
+            <th class="num">占比</th>
+          </tr></thead>
+          <tbody id="modelRows"><tr><td colspan="8" class="empty">暂无数据</td></tr></tbody>
+        </table>
+      </div>
     </div>
 
     <div class="section">
       <h2>最近一年用量</h2>
       <div class="heat-wrap">
         <div class="heat-body">
-          <div class="heat-weekdays"><span>一</span><span></span><span>三</span><span></span><span>五</span><span></span><span>日</span></div>
-          <div>
+          <div class="heat-weekdays">
+            <div class="spacer"></div>
+            <span class="day">一</span><span class="day"></span><span class="day">三</span><span class="day"></span><span class="day">五</span><span class="day"></span><span class="day">日</span>
+          </div>
+          <div class="heat-scroll">
             <div class="heat-months" id="heatMonths"></div>
             <div class="heat" id="heat"></div>
           </div>
@@ -174,24 +228,13 @@ export function buildUsageHtml(data: UsageViewData): string {
       </div>
       <div class="warn" id="pluginWarn" hidden></div>
     </div>
-
-    <div class="section">
-      <h2>模型明细</h2>
-      <div style="border:1px solid var(--border);border-radius:10px;overflow:hidden">
-        <table>
-          <thead><tr>
-            <th>模型</th>
-            <th class="num">Token</th>
-            <th class="num">请求</th>
-            <th class="num">花费</th>
-            <th style="width:120px">占比</th>
-          </tr></thead>
-          <tbody id="modelRows"><tr><td colspan="5" class="empty">暂无数据</td></tr></tbody>
-        </table>
-      </div>
-    </div>
   </div>
   <div id="tip" role="tooltip"></div>
+  <script>window.__PI_WEB_BOX_ICONS__ = ${JSON.stringify({
+    dark: data.darkIconDataUrl,
+    light: data.lightIconDataUrl,
+  }).replaceAll("<", "\\u003c")};</script>
+  <script>${TITLE_BAR_SCRIPT}</script>
   <script>${data.rendererScript}</script>
 </body>
 </html>`;
@@ -236,3 +279,25 @@ export function formatTokens(value: number): string {
 }
 
 export type { UsageSummary, UsageOverview };
+
+/**
+ * 热力图固定展示 53 周，格子区宽度可以提前算出来：
+ * 每列 11px 加 3px 间距。
+ */
+export const HEATMAP_WEEKS = 53;
+const HEAT_CELL = 11;
+const HEAT_GAP = 3;
+
+/** 热力图格子区的像素宽度（不含星期标签与内边距）。 */
+export function heatmapGridWidth(weeks = HEATMAP_WEEKS): number {
+  return weeks * HEAT_CELL + (weeks - 1) * HEAT_GAP;
+}
+
+/**
+ * 统计窗口的初始宽度。
+ * 实测查询条件行单排约需 873px（含页面内边距），这里取 920 留些余量；
+ * 渲染层加载后会再按实际宽度调用 fitUsageWindow 精确微调。
+ */
+export function usageWindowWidth(): number {
+  return 920;
+}

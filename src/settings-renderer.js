@@ -117,9 +117,37 @@ function renderModels(selected) {
 fields.enhanceProvider.addEventListener("change", () => renderModels(""));
 
 // ── 保存与重置 ──
+
+/** 监听地址已开放到局域网时，提醒用户必须设置访问密码。 */
+function needsPassword(hostname, password) {
+  const host = (hostname || "").trim().toLowerCase();
+  const isLoopback = !host || host === "127.0.0.1" || host === "localhost" || host === "::1";
+  return !isLoopback && !(password || "").trim();
+}
+
+/** 监听地址从本机改为局域网（或反向）时需要重启才能生效。 */
+function needsRestart(previous, next) {
+  const keys = ["port", "hostname", "allowedHosts", "password", "commandPath", "nodePath"];
+  return keys.some((key) => (previous.piWeb?.[key] || "") !== (next.piWeb?.[key] || ""));
+}
+
 async function save() {
+  const form = collectForm();
+
+  // 开放到局域网但没有密码时用弹框提醒，比底部提示更明显。
+  if (needsPassword(form.piWeb.hostname, form.piWeb.password)) {
+    setStatus(statusEl, "监听地址已开放到局域网，请设置访问密码", "err");
+    window.alert(
+      "监听主机名不是本机回环地址，Pi Web 将暴露到局域网。\n\n" +
+      "请先在「访问密码」中设置一个足够长的密码，再点保存。",
+    );
+    fields.password.focus();
+    return false;
+  }
+
+  const before = snapshot ? JSON.parse(JSON.stringify(snapshot.settings)) : null;
   setStatus(statusEl, "正在保存…");
-  const result = await api.saveSettings(collectForm());
+  const result = await api.saveSettings(form);
   if (!result.ok) {
     setStatus(statusEl, result.message, "err");
     return false;
@@ -130,6 +158,28 @@ async function save() {
     renderProviders(result.snapshot);
     renderLan(result.snapshot);
   }
+
+  // 启动参数变了就询问是否立即重启；取消则把配置回退到保存之前。
+  if (before && result.snapshot && needsRestart(before, result.snapshot.settings)) {
+    const confirmed = window.confirm(
+      "启动参数已保存，需要重启 Pi Web Box 才能生效。\n\n" + "现在重启吗？选择“取消”将放弃本次修改。",
+    );
+    if (confirmed) {
+      setStatus(statusEl, "正在重启…", "ok");
+      void api.restartApp();
+      return true;
+    }
+    const rollback = await api.saveSettings(before);
+    if (rollback.snapshot) {
+      snapshot = rollback.snapshot;
+      renderForm(rollback.snapshot);
+      renderProviders(rollback.snapshot);
+      renderLan(rollback.snapshot);
+    }
+    setStatus(statusEl, "已取消，配置已回退", "err");
+    return false;
+  }
+
   setStatus(statusEl, "已保存，重启 Pi Web Box 后生效", "ok");
   return true;
 }
@@ -137,8 +187,18 @@ async function save() {
 document.getElementById("save").addEventListener("click", () => void save());
 
 document.getElementById("saveEnhance").addEventListener("click", async () => {
-  const ok = await save();
-  if (ok) setStatus(enhanceStatus, "已保存，即刻生效", "ok");
+  setStatus(enhanceStatus, "正在保存…");
+  const result = await api.saveSettings(collectForm());
+  if (!result.ok) {
+    setStatus(enhanceStatus, result.message, "err");
+    return;
+  }
+  if (result.snapshot) {
+    snapshot = result.snapshot;
+    renderProviders(result.snapshot);
+  }
+  // 增强模型属于立即生效的配置，不涉及重启。
+  setStatus(enhanceStatus, "已保存，即刻生效", "ok");
 });
 
 document.getElementById("resetPiWeb").addEventListener("click", async () => {
@@ -164,7 +224,11 @@ for (const [element, message] of [
       element.checked = !element.checked;
       return;
     }
-    if (result.snapshot) snapshot = result.snapshot;
+    // 用返回值回填表单，确保界面显示的就是真正保存下来的状态。
+    if (result.snapshot) {
+      snapshot = result.snapshot;
+      renderForm(result.snapshot);
+    }
     setStatus(statusEl, message(), "ok");
   });
 }
@@ -270,32 +334,54 @@ function applyPalette(palette, isDark) {
   root.style.setProperty("--text", palette.text);
   root.style.setProperty("--text-muted", palette.textMuted);
   root.style.setProperty("--accent", palette.accent);
+  // 标题栏底色用面板色（对应 pi-web 顶部工具栏区域），
+  // 与主窗口标题栏取的是同一处颜色。
+  root.style.setProperty("--titlebar-bg", palette.panel);
   root.dataset.theme = palette.id;
   // 品牌图标按主题深浅切换，深色主题用白色 logo。
   const brand = document.getElementById("brandIcon");
   if (brand && window.__PI_WEB_BOX_ICONS__) {
     brand.src = isDark ? window.__PI_WEB_BOX_ICONS__.dark : window.__PI_WEB_BOX_ICONS__.light;
   }
+  // 自绘标题栏的图标也要跟着切。
+  window.__piWebBoxSetTitleBarIcon?.(isDark);
+}
+
+// 主题名文案是可选展示项，用可选链兜底：
+// 之前这里的元素缺失会让整个脚本抛错，导致后面的表单填充、供应商下拉、
+// 关于信息与插件检测全部不执行。
+function setThemeName(text) {
+  if (themeName) themeName.textContent = text;
 }
 
 api.onSettingsTheme(({ palette }) => {
   applyPalette(palette, palette.id === "dark" || palette.id === "pine");
-  themeName.textContent = palette.label;
+  setThemeName(palette.label);
 });
 
 // 首次渲染：主题色板已由主进程写入页面，这里只补充数据与图标。
 const boot = window.__PI_WEB_BOX_BOOT__ || {};
 if (boot.palette) {
   applyPalette({ id: boot.theme, ...boot.palette }, !!boot.isDark);
-  themeName.textContent = boot.label || "—";
+  setThemeName(boot.label || "—");
 }
 
+// 初始化流程整体包一层：任何单点异常都不应阻断其余模块的渲染。
 api.getSettings().then((data) => {
   snapshot = data;
-  renderForm(data);
-  renderProviders(data);
-  renderLan(data);
-  renderAbout(data.about);
-  renderExtension(data.usageExtension);
-  if (!boot.label) themeName.textContent = data.themeLabel || "—";
+  const steps = [
+    ["表单", () => renderForm(data)],
+    ["供应商", () => renderProviders(data)],
+    ["局域网地址", () => renderLan(data)],
+    ["关于", () => renderAbout(data.about)],
+    ["用量插件", () => renderExtension(data.usageExtension)],
+  ];
+  for (const [label, run] of steps) {
+    try {
+      run();
+    } catch (error) {
+      console.error(`[Pi Web Box] 渲染${label}失败：`, error);
+    }
+  }
+  if (!boot.label) setThemeName(data.themeLabel || "—");
 });

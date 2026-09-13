@@ -42,6 +42,12 @@ declare global {
 
       // ── 用量统计窗口 ──
       queryUsage: (query: UsageQuery) => Promise<{ ok: boolean; overview?: UsageOverview; message?: string }>;
+      // 按实际内容宽度微调统计窗口，避免查询条件行折行。
+      fitUsageWindow: (width: number) => Promise<boolean>;
+      // 自绘标题栏的窗口按钮。
+      titleBarMinimize: () => Promise<void>;
+      titleBarClose: () => Promise<void>;
+      titleBarToggleMaximize: () => Promise<boolean>;
 
       // ── Pi Web 页面内注入脚本使用 ──
       openSettings: (pane?: string) => Promise<void>;

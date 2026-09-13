@@ -26,8 +26,12 @@ export function quoteCmdArg(value: string): string {
   return `"${value.replaceAll('"', '\\"')}"`;
 }
 
-export function isHealthyPiWebStatus(status: number, body: string): boolean {
-  return status >= 200 && status < 400 && /Pi Web/i.test(body);
+export function isHealthyPiWebStatus(status: number, body: string, location = ""): boolean {
+  if (status >= 200 && status < 300) return /Pi Web/i.test(body);
+  // 启用访问密码后访问 / 会 307 跳到 /login，此时响应体只有几字节、不含页面内容。
+  // 只认跳向登录页的情况，避免把端口上其他返回重定向的服务误判成 Pi Web。
+  if (status >= 300 && status < 400) return /^\/(login|auth)\b/i.test(location.trim());
+  return false;
 }
 
 async function getFreePort(): Promise<number> {
@@ -56,9 +60,10 @@ async function readPiWebPage(port: number, password?: string): Promise<boolean> 
   const timer = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
   const headers = password ? { Authorization: `Basic ${Buffer.from(`pi:${password}`).toString("base64")}` } : undefined;
   try {
-    const response = await fetch(`http://127.0.0.1:${port}/`, { signal: controller.signal, redirect: "manual", headers });
+    // 跟随重定向：启用密码时 / 会跳到 /login，登录页同样属于正常就绪状态。
+    const response = await fetch(`http://127.0.0.1:${port}/`, { signal: controller.signal, redirect: "follow", headers });
     const body = await response.text();
-    return isHealthyPiWebStatus(response.status, body);
+    return isHealthyPiWebStatus(response.status, body, response.headers.get("location") || "");
   } catch {
     return false;
   } finally {

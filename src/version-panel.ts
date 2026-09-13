@@ -2,7 +2,9 @@ import type { ComponentVersions } from "./contracts.js";
 import { THEME_PALETTES } from "./themes.js";
 
 export type VersionPanelData = ComponentVersions & {
-  iconDataUrl: string;
+  // 品牌 logo：深色主题用白色版，浅色主题用深色版。
+  darkIconDataUrl: string;
+  lightIconDataUrl: string;
   // 关于面板展示的联系方式与仓库地址。
   github: string;
   qq: string;
@@ -30,10 +32,18 @@ export function buildVersionPanelScript(data: VersionPanelData): string {
     // 复用已有实例：仅更新数据，避免重复注入造成多个悬浮球。
     const existing = document.getElementById("${PANEL_ID}");
     if (existing && existing.__piWebBoxUpdate) {
+      // 顺手清理可能残留的重复实例，只保留当前这一个。
+      for (const stale of document.querySelectorAll("#${PANEL_ID}")) {
+        if (stale !== existing) stale.remove();
+      }
       existing.__piWebBoxUpdate(data);
       return;
     }
-    document.getElementById("${PANEL_ID}")?.remove();
+    // 旧实例的主题监听会继续调用自身的更新逻辑，这里一并停掉。
+    for (const stale of document.querySelectorAll("#${PANEL_ID}")) {
+      try { stale.__piWebBoxTeardown?.(); } catch (error) { void error; }
+      stale.remove();
+    }
 
     const host = document.createElement("div");
     host.id = "${PANEL_ID}";
@@ -53,7 +63,8 @@ export function buildVersionPanelScript(data: VersionPanelData): string {
         .trigger { width: 46px; height: 46px; padding: 0; border: 1px solid var(--p-border); border-radius: 50%; background: var(--p-logo-bg); box-shadow: 0 3px 12px rgba(0,0,0,.16); cursor: pointer; display: grid; place-items: center; transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease; }
         .trigger:hover { border-color: var(--p-accent); box-shadow: 0 6px 18px rgba(0,0,0,.2); transform: translateY(-1px); }
         .trigger:focus-visible { outline: 2px solid var(--p-accent); outline-offset: 3px; }
-        .trigger svg { width: 24px; height: 24px; display: block; fill: var(--p-logo-fg); }
+        /* 直接展示品牌 logo：按主题切换深浅两版，不再用内联简化图形。 */
+        .trigger img { width: 26px; height: 26px; display: block; }
         .panel { position: absolute; right: 0; bottom: 56px; width: 292px; padding: 8px; border: 1px solid var(--p-border); border-radius: 10px; background: var(--p-bg); box-shadow: 0 12px 36px rgba(0,0,0,.2); box-sizing: border-box; opacity: 0; visibility: hidden; pointer-events: none; transform: translateY(8px) scale(.97); transform-origin: bottom right; transition: opacity 160ms ease, transform 180ms ease, visibility 0s linear 180ms; }
         .panel::after { content: ""; position: absolute; right: 0; bottom: -12px; width: 72px; height: 14px; }
         .panel.open { opacity: 1; visibility: visible; pointer-events: auto; transform: translateY(0) scale(1); transition-delay: 0s; }
@@ -70,10 +81,6 @@ export function buildVersionPanelScript(data: VersionPanelData): string {
         .action { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; line-height: 1; color: var(--p-text); }
         .action svg { width: 15px; height: 15px; flex: none; display: block; color: var(--p-muted); }
         .action span { line-height: 15px; }
-        .meta { padding: 2px 9px 8px; font-size: 11.5px; line-height: 1.6; color: var(--p-muted); }
-        .meta code { font-family: Consolas, monospace; color: var(--p-text); }
-        .meta a { color: var(--p-accent); text-decoration: none; }
-        .meta a:hover { text-decoration: underline; }
         @media (prefers-reduced-motion: reduce) { .trigger, .panel { transition: none; } }
       </style>
       <div class="wrap">
@@ -114,23 +121,18 @@ export function buildVersionPanelScript(data: VersionPanelData): string {
           <a class="item" href="https://github.com/passheep/pi-web-box" target="_blank" rel="noopener noreferrer" title="在浏览器中打开 Pi Web Box GitHub">
             <span class="name">Pi Web Box <span class="external">↗</span></span><span class="version"></span>
           </a>
-          <div class="divider"></div>
-          <div class="meta">
-            联系 QQ：<code>903081605</code><br>
-            仓库：<a href="https://github.com/passheep/pi-web-box" target="_blank" rel="noopener noreferrer">github.com/passheep/pi-web-box</a>
-          </div>
         </div>
         <button class="trigger" type="button" title="关于 Pi Web Box" aria-label="关于 Pi Web Box" aria-expanded="false">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h13v20h-2.6V13.2h-2.9V22h-2.6V13.2H8.6V22H6V2zm5.2 2.4h2.6v6.4h-2.6V4.4z"></path></svg>
+          <img class="logo" alt="" />
         </button>
       </div>
     \`;
 
     const wrap = shadow.querySelector(".wrap");
     const button = shadow.querySelector(".trigger");
+    const logo = shadow.querySelector(".logo");
     const panel = shadow.querySelector(".panel");
     const versions = shadow.querySelectorAll(".version");
-    const meta = shadow.querySelector(".meta");
     let closeTimer;
 
     // 主题配色映射：深色主题用深底浅字，浅色主题反之。
@@ -146,9 +148,12 @@ export function buildVersionPanelScript(data: VersionPanelData): string {
       style.setProperty("--p-accent", palette.accent);
       // hover 底色取面板色向文字色靠拢一点，两种主题都适用。
       style.setProperty("--p-hover", isDark ? palette.panel : palette.panel);
-      // logo：深色主题用深底浅字，浅色主题用浅底深字。
-      style.setProperty("--p-logo-bg", isDark ? palette.panel : "#ffffff");
+      // logo 底色与面板一致，跟随主题而不是写死白色，
+      // 否则雾青/蔷薇等主题下圆形按钮会与页面脱节。
+      style.setProperty("--p-logo-bg", palette.panel);
       style.setProperty("--p-logo-fg", isDark ? palette.text : "#1a1a1a");
+      // 品牌 logo 按主题深浅切换，与设置窗口的左上角图标保持一致。
+      if (logo) logo.src = isDark ? data.darkIconDataUrl : data.lightIconDataUrl;
     };
 
     const update = (next) => {
@@ -158,10 +163,6 @@ export function buildVersionPanelScript(data: VersionPanelData): string {
       versions[3].textContent = next.pi;
       versions[4].textContent = next.piWeb;
       versions[5].textContent = next.piWebBox;
-      if (next.qq) {
-        meta.innerHTML = '联系 QQ：<code>' + next.qq + '</code><br>仓库：<a href="' + next.github +
-          '" target="_blank" rel="noopener noreferrer">github.com/passheep/pi-web-box</a>';
-      }
       applyPalette(document.documentElement.dataset.theme || "light");
     };
     host.__piWebBoxUpdate = update;
@@ -235,5 +236,14 @@ export function buildVersionPanelScript(data: VersionPanelData): string {
     }
 
     window.__piWebBoxThemeSync.report();
+
+    // 重新注入时先停掉本实例的主题监听，避免旧实例继续上报与重绘。
+    host.__piWebBoxTeardown = () => {
+      const sync = window.__piWebBoxThemeSync;
+      if (sync && sync.report === report) {
+        sync.observer?.disconnect?.();
+        delete window.__piWebBoxThemeSync;
+      }
+    };
   })()`;
 }

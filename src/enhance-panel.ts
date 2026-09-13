@@ -32,23 +32,42 @@ export function buildEnhancePanelScript(data: EnhancePanelData): string {
 
   return `(() => {
     const data = ${payload};
-    document.getElementById("${PANEL_ID}")?.remove();
+    // 重复注入时要把旧实例彻底停掉：仅靠 remove() 删元素不够，
+    // 旧实例的 MutationObserver 与定时器还会把它 appendChild 回来，
+    // 表现为每保存一次设置就多出一个控件。
+    for (const stale of document.querySelectorAll("#${PANEL_ID}")) {
+      try { stale.__piWebBoxTeardown?.(); } catch (error) { void error; }
+      stale.remove();
+    }
 
     const host = document.createElement("div");
     host.id = "${PANEL_ID}";
-    host.style.cssText = "display:inline-flex;align-items:center;gap:6px;margin-left:2px";
+    // 占位尺寸与模型按钮一致，注入时不会把同一行的其它按钮挤走。
+    host.style.cssText = "display:inline-flex;align-items:center;height:32px;flex:none";
 
     const shadow = host.attachShadow({ mode: "open" });
     shadow.innerHTML = \`
       <style>
-        :host { all: initial; }
-        .wrap { position: relative; display: inline-flex; align-items: center; gap: 6px; font-family: "Segoe UI", system-ui, sans-serif; }
-        button { display: inline-flex; align-items: center; gap: 5px; height: 32px; padding: 0 10px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; transition: background 140ms ease, color 140ms ease; }
+        /* all:initial 会清掉继承来的自定义属性，所以这里显式声明一套变量，
+           否则 var(--text) 之类的引用全部失效，文字会回退成黑色。 */
+        :host {
+          all: initial;
+          --text: ${data.palette.text};
+          --muted: ${data.palette.textMuted};
+          --border: ${data.palette.border};
+          --panel: ${data.palette.panel};
+          --bg: ${data.palette.background};
+          --accent: ${data.palette.accent};
+          --hover: ${data.palette.panel};
+        }
+        /* 样式对齐 pi-web 的模型选择按钮：32px 高、9px 圆角、12px 字号。 */
+        .wrap { position: relative; display: inline-flex; align-items: center; gap: 2px; font-family: "Segoe UI", system-ui, sans-serif; }
+        button { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font: inherit; font-size: 12px; font-weight: 400; cursor: pointer; transition: background .12s ease, color .12s ease; }
         button:hover:not(:disabled) { background: var(--hover); color: var(--text); }
         button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
         button:disabled { opacity: .5; cursor: not-allowed; }
         button svg { width: 14px; height: 14px; flex: none; }
-        select { height: 32px; padding: 0 6px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; }
+        select { height: 32px; padding: 0 6px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; transition: background .12s ease, color .12s ease; }
         select:hover { background: var(--hover); color: var(--text); }
         select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
         /* 「回到底部」按钮：固定在右下角圆形 logo 上方 */
@@ -248,8 +267,8 @@ export function buildEnhancePanelScript(data: EnhancePanelData): string {
   });
 
   // ── 控件归位 ──
-  // pi-web 是客户端渲染的：页面刚打开时工具栏可能还没挂载，
-  // 这里允许反复尝试，一旦锚点出现就把控件移回模型按钮所在行。
+  // pi-web 是客户端渲染的：页面刚打开时工具栏可能还没挂载。
+  // 未找到锚点前先隐藏控件，避免它先在左侧出现、等模型加载完成后再跳位。
   let placedInToolbar = false;
   const placePanel = () => {
     const anchor = [...document.querySelectorAll("button")].find(
@@ -258,21 +277,17 @@ export function buildEnhancePanelScript(data: EnhancePanelData): string {
     const row = anchor?.parentElement?.parentElement || anchor?.parentElement;
     if (row) {
       if (host.parentElement !== row) row.appendChild(host);
-      // 回到工具栏后清掉兜底定位，避免留下多余的浮动样式。
-      host.style.cssText = host.style.cssText.replace(/;?position:fixed[^;]*|;?right:[^;]*|;?bottom:[^;]*|;?z-index:2147483000/g, "");
+      // 回到工具栏后清掉兜底定位与隐藏状态。
+      host.style.position = "";
+      host.style.right = "";
+      host.style.bottom = "";
+      host.style.zIndex = "";
+      host.style.visibility = "";
       placedInToolbar = true;
       return;
     }
-    // 锚点还没出现时先固定到输入框上方，保证按钮始终可用。
-    if (!placedInToolbar && host.parentElement !== document.body) {
-      document.body.appendChild(host);
-    }
-    if (host.parentElement === document.body) {
-      host.style.position = "fixed";
-      host.style.right = "22px";
-      host.style.bottom = "130px";
-      host.style.zIndex = "2147483000";
-    }
+    // 锚点还没出现：保持隐藏占位，等下一轮 MutationObserver 再试。
+    if (!placedInToolbar) host.style.visibility = "hidden";
   };
 
   const observer = new MutationObserver(() => {
@@ -281,7 +296,39 @@ export function buildEnhancePanelScript(data: EnhancePanelData): string {
     watchNewMessages();
   });
   observer.observe(document.body, { childList: true, subtree: true });
-  setInterval(() => { placePanel(); attachScroller(); watchNewMessages(); }, 1500);
+  const pollTimer = setInterval(() => { placePanel(); attachScroller(); watchNewMessages(); }, 1500);
+  // 首屏渲染很快，先用高频短轮询把控件尽早放到正确位置，
+  // 避免模型按钮出现前控件长时间隐藏。
+  let fastTicks = 0;
+  const fastTimer = setInterval(() => {
+    placePanel();
+    fastTicks += 1;
+    if (placedInToolbar || fastTicks > 40) clearInterval(fastTimer);
+  }, 80);
+
+  // 主题变化时同步控件配色。
+  const themeObserver = new MutationObserver(() => {
+    const cs = getComputedStyle(document.documentElement);
+    const read = (name, fallback) => cs.getPropertyValue(name).trim() || fallback;
+    const root = shadow.host;
+    root.style.setProperty("--text", read("--text", data.text));
+    root.style.setProperty("--muted", read("--text-muted", data.textMuted));
+    root.style.setProperty("--border", read("--border", data.border));
+    root.style.setProperty("--panel", read("--bg-panel", data.panel));
+    root.style.setProperty("--bg", read("--bg", data.background));
+    root.style.setProperty("--accent", read("--accent", data.accent));
+    root.style.setProperty("--hover", read("--bg-panel", data.panel));
+  });
+  themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme", "class"] });
+
+  // 供下一次注入调用：先停掉本实例的监听与定时器，再让新实例接管。
+  host.__piWebBoxTeardown = () => {
+    observer.disconnect();
+    themeObserver.disconnect();
+    clearInterval(pollTimer);
+    clearInterval(fastTimer);
+    if (scroller) scroller.removeEventListener("scroll", updateToBottom);
+  };
 
   // ── 增强流程 ──
   let lastOriginal = "";

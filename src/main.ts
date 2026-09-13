@@ -19,7 +19,7 @@ import { PiWebProcessManager } from "./pi-web-process.js";
 import { isLoopbackHostname, SettingsStore, type BoxSettings } from "./config.js";
 import { ShortcutManager, type IconTheme } from "./shortcut.js";
 import { getPalette, isKnownTheme } from "./themes.js";
-import { resolveTitleBarBackground, TitleBarColorizer } from "./titlebar.js";
+import { buildMainTitleBarScript } from "./titlebar-view.js";
 import {
   VersionManager,
   type InstalledVersionInfo,
@@ -28,7 +28,7 @@ import {
 } from "./version-manager.js";
 import { buildVersionPanelScript } from "./version-panel.js";
 import { buildSettingsHtml } from "./settings-view.js";
-import { buildUsageHtml } from "./usage-view.js";
+import { buildUsageHtml, usageWindowWidth } from "./usage-view.js";
 import { buildEnhancePanelScript } from "./enhance-panel.js";
 import { buildUsageOverview, readUsageRecords, toLocalDate, usageLogPath } from "./usage.js";
 import { checkUsageLogExtension, installUsageLogExtension, piAgentDirectory } from "./extensions.js";
@@ -51,12 +51,9 @@ let runningPoller: NodeJS.Timeout | undefined;
 let manager: PiWebProcessManager | undefined;
 let shortcutManager: ShortcutManager | undefined;
 let settingsStore: SettingsStore | undefined;
-let titleBarColorizer: TitleBarColorizer | undefined;
 let startupInFlight: Promise<void> | undefined;
 let updateCheckCompleted = false;
 let isQuitting = false;
-let versionPanelIconDataUrl = "";
-let settingsIconDataUrl = "";
 let currentTheme = "";
 // 记录 Pi Web 页面实测到的标题栏背景色（顶栏的 --bg-panel），标题栏优先生效该值。
 let currentThemeBackground = "";
@@ -306,14 +303,10 @@ function readIconDataUrl(fileName: string): string {
 
 async function injectVersionPanel(): Promise<void> {
   if (!mainWindow || mainWindow.isDestroyed() || !isPiWebPage(mainWindow.webContents.getURL())) return;
-  if (!versionPanelIconDataUrl) {
-    // 悬浮按钮的图标随主题在深浅两版间切换，这里只预热，具体用哪张由页面决定。
-    versionPanelIconDataUrl = readIconDataUrl("pi-logo-on-light.svg");
-  }
   try {
     // 关于面板：版本、联系方式、设置与统计入口。
     await mainWindow.webContents.executeJavaScript(
-      buildVersionPanelScript(buildPanelData(versionPanelIconDataUrl)), true,
+      buildVersionPanelScript(buildPanelData()), true,
     );
   } catch (error) {
     log(`Could not inject version panel: ${error instanceof Error ? error.message : String(error)}`);
@@ -328,20 +321,54 @@ async function injectVersionPanel(): Promise<void> {
   }
 }
 
-/** 把当前主题应用到 Windows 原生标题栏，缺失页面颜色时回退到内置色板。 */
-function applyTitleBarTheme(): void {
-  if (!mainWindow || mainWindow.isDestroyed() || !titleBarColorizer) return;
+/**
+ * 把当前主题应用到主窗口页面内的自绘标题栏。
+ * DWM 着色在 Electron 窗口上不生效（调用成功但系统忽略），
+ * 所以主窗口也改为页面内绘制，颜色直接跟随 Pi Web 主题。
+ */
+async function applyTitleBarTheme(): Promise<void> {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
   if (!isPiWebPage(mainWindow.webContents.getURL())) return;
-  const background = resolveTitleBarBackground(currentTheme, currentThemeBackground, nativeTheme.shouldUseDarkColors);
-  const hwnd = mainWindow.getNativeWindowHandle().readBigUInt64LE(0).toString();
-  titleBarColorizer.apply(hwnd, background);
+  const palette = getPalette(currentTheme, nativeTheme.shouldUseDarkColors);
+  const isDark = currentTheme === "dark" || currentTheme === "pine";
+  try {
+    await mainWindow.webContents.executeJavaScript(
+      buildMainTitleBarScript({
+        title: "Pi Web Box",
+        iconDataUrl: readIconDataUrl(isDark ? "pi-logo-on-dark.svg" : "pi-logo-on-light.svg"),
+        // 与设置/统计窗口的自绘标题栏保持同一底色（页面背景）。
+        background: palette.background,
+        border: palette.border,
+        text: palette.text,
+        textMuted: palette.textMuted,
+        hover: palette.panel,
+      }),
+      true,
+    );
+  } catch (error) {
+    log(`Could not draw window title bar: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/**
+ * 子窗口（设置 / 统计）使用页面自绘的标题栏，
+ * 这里把主题色板推给它们，颜色由页面自己的变量控制。
+ */
+function applyChildTitleBarTheme(): void {
+  const palette = getPalette(currentTheme, nativeTheme.shouldUseDarkColors);
+  const payload = { palette, theme: currentTheme || palette.id };
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.webContents.send("pi-web-box:settings-theme", payload);
+  }
+  if (usageWindow && !usageWindow.isDestroyed()) {
+    usageWindow.webContents.send("pi-web-box:settings-theme", payload);
+  }
 }
 
 /** 通知设置窗口跟随 Pi Web 的最新主题。 */
 function broadcastThemeToSettings(): void {
-  if (!settingsWindow || settingsWindow.isDestroyed()) return;
-  const palette = getPalette(currentTheme, nativeTheme.shouldUseDarkColors);
-  settingsWindow.webContents.send("pi-web-box:settings-theme", { palette, theme: currentTheme || palette.id });
+  // 子窗口的自绘标题栏依赖页面里的主题变量，每次主题变化都要推送一次。
+  applyChildTitleBarTheme();
 }
 
 function updateTheme(theme: string, background: string): void {
@@ -349,7 +376,7 @@ function updateTheme(theme: string, background: string): void {
   if (!normalized && !background) return;
   currentTheme = normalized || currentTheme;
   currentThemeBackground = background || currentThemeBackground;
-  applyTitleBarTheme();
+  void applyTitleBarTheme();
   broadcastThemeToSettings();
 }
 
@@ -409,11 +436,12 @@ function getSettingsSnapshot(): SettingsSnapshot {
 }
 
 /** 组装注入到页面里的关于面板数据。 */
-function buildPanelData(iconDataUrl: string) {
+function buildPanelData() {
   const { provider, model } = settingsStore!.get().enhance;
   return {
     ...componentVersions,
-    iconDataUrl,
+    darkIconDataUrl: readIconDataUrl("pi-logo-on-dark.svg"),
+    lightIconDataUrl: readIconDataUrl("pi-logo-on-light.svg"),
     github: GITHUB_URL,
     qq: CONTACT_QQ,
     enhanceConfigured: !!(provider && model),
@@ -470,7 +498,6 @@ function createSettingsWindow(pane?: string): void {
     settingsWindow.focus();
     return;
   }
-  if (!settingsIconDataUrl) settingsIconDataUrl = readIconDataUrl("pi-logo-on-light.svg");
 
   settingsWindow = new BrowserWindow({
     width: 780,
@@ -481,6 +508,11 @@ function createSettingsWindow(pane?: string): void {
     title: "Pi Web Box 设置",
     icon: assetPath("pi-logo-adaptive.ico"),
     parent: mainWindow,
+    // 子窗口属于主窗口的一部分，不单独占任务栏位置。
+    skipTaskbar: true,
+    // 不用 Windows 原生标题栏：改用页面自绘的标题栏，
+    // 颜色完全跟随 Pi Web 主题，不会出现系统默认灰。
+    frame: false,
     backgroundColor: getPalette(currentTheme, nativeTheme.shouldUseDarkColors).background,
     autoHideMenuBar: true,
     webPreferences: {
@@ -507,7 +539,6 @@ function createSettingsWindow(pane?: string): void {
   const html = buildSettingsHtml({
     theme: palette.id,
     systemDark: nativeTheme.shouldUseDarkColors,
-    iconDataUrl: settingsIconDataUrl,
     rendererScript,
     darkIconDataUrl: readIconDataUrl("pi-logo-on-dark.svg"),
     lightIconDataUrl: readIconDataUrl("pi-logo-on-light.svg"),
@@ -527,10 +558,14 @@ function createSettingsWindow(pane?: string): void {
     settingsInitialPane = "appearance";
     settingsWindow?.show();
     settingsWindow?.focus();
+    // 窗口显示后再着色：此时句柄已就绪，不会出现默认色一闪而过。
+    applyChildTitleBarTheme();
   }).catch((error) => {
     log(`Could not open settings window: ${error instanceof Error ? error.message : String(error)}`);
   });
-  settingsWindow.on("closed", () => { settingsWindow = undefined; });
+  settingsWindow.on("closed", () => {
+    settingsWindow = undefined;
+  });
 }
 
 /** 创建（或复用）Token 用量统计窗口。 */
@@ -543,29 +578,36 @@ function createUsageWindow(): void {
   const palette = getPalette(currentTheme, nativeTheme.shouldUseDarkColors);
   const rendererScript = fs.readFileSync(appFilePath(path.join("build", "usage-renderer.js")), "utf8");
 
-  // 默认展示最近 30 天，与快捷按钮的默认口径保持一致。
+  // 默认展示今天，符合“先看今天用了多少”的习惯。
   const today = new Date();
-  const start = new Date(today);
-  start.setDate(start.getDate() - 29);
   const isoDate = (date: Date) => toLocalDate(date.getTime());
 
   const html = buildUsageHtml({
     theme: palette.id,
     systemDark: nativeTheme.shouldUseDarkColors,
-    iconDataUrl: "",
     rendererScript,
-    defaultFrom: isoDate(start),
+    darkIconDataUrl: readIconDataUrl("pi-logo-on-dark.svg"),
+    lightIconDataUrl: readIconDataUrl("pi-logo-on-light.svg"),
+    defaultFrom: isoDate(today),
     defaultTo: isoDate(today),
   });
 
   usageWindow = new BrowserWindow({
-    width: 980,
-    height: 760,
-    minWidth: 780,
-    minHeight: 560,
+    // 宽度按查询条件行计算，保证筛选控件不换行。
+    width: usageWindowWidth(),
+    height: 780,
+    // 宽度固定，避免手动缩放后布局错位。
+    resizable: false,
+    maximizable: false,
+    fullscreenable: false,
     show: false,
     title: "Token 用量统计",
     icon: assetPath("pi-logo-adaptive.ico"),
+    parent: mainWindow,
+    // 与设置窗口一致：作为子窗口不单独占任务栏位置。
+    skipTaskbar: true,
+    // 不用 Windows 原生标题栏，改用页面自绘的标题栏。
+    frame: false,
     backgroundColor: palette.background,
     autoHideMenuBar: true,
     webPreferences: {
@@ -593,10 +635,14 @@ function createUsageWindow(): void {
   usageWindow.loadFile(htmlPath).then(() => {
     usageWindow?.show();
     usageWindow?.focus();
+    // 与设置窗口一致，显示后重新着色标题栏。
+    applyChildTitleBarTheme();
   }).catch((error) => {
     log(`Could not open usage window: ${error instanceof Error ? error.message : String(error)}`);
   });
-  usageWindow.on("closed", () => { usageWindow = undefined; });
+  usageWindow.on("closed", () => {
+    usageWindow = undefined;
+  });
 }
 
 /** 查询 pi-web 的运行中会话，供托盘角标与完成通知使用。 */
@@ -718,6 +764,9 @@ function createWindow(): void {
     show: false,
     title: "Pi Web Box",
     icon,
+    // 不用 Windows 原生标题栏：DWM 着色在 Electron 窗口上不生效，
+    // 改为在页面内自绘标题栏，与设置/统计窗口保持一致。
+    frame: false,
     backgroundColor: nativeTheme.shouldUseDarkColors ? "#18181b" : "#f7f8fa",
     autoHideMenuBar: true,
     webPreferences: {
@@ -761,8 +810,11 @@ function createWindow(): void {
   });
   mainWindow.webContents.on("did-finish-load", () => {
     void injectVersionPanel();
-    // 页面加载完成后立刻按当前主题刷新标题栏，页面内部的主题上报会随后覆盖它。
-    setTimeout(() => applyTitleBarTheme(), 300);
+    // 页面加载完成后立刻画出自绘标题栏；启动时若是最大化状态，
+    // 也要把按钮图标切换到「向下还原」。
+    setTimeout(() => {
+      void applyTitleBarTheme().then(() => notifyMaximizeState());
+    }, 300);
   });
   // 关闭按钮按设置决定是退出还是留在托盘。
   mainWindow.on("close", (event) => {
@@ -777,6 +829,19 @@ function createWindow(): void {
     }
   });
   mainWindow.on("closed", () => { mainWindow = undefined; });
+  // 主窗口使用页面自绘标题栏，重新获得焦点时补画一次：
+  // 主题上报可能晚于页面渲染，这里保证颜色始终与页面一致。
+  mainWindow.on("focus", () => void applyTitleBarTheme());
+  // 最大化状态变化时通知页面切换按钮图标（最大化 / 向下还原）。
+  const notifyMaximizeState = () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!isPiWebPage(mainWindow.webContents.getURL())) return;
+    void mainWindow.webContents.executeJavaScript(
+      `window.__piWebBoxMainTitleBar?.setMaximized?.(${mainWindow.isMaximized()});`, true,
+    ).catch(() => {});
+  };
+  mainWindow.on("maximize", notifyMaximizeState);
+  mainWindow.on("unmaximize", notifyMaximizeState);
   void startPiWeb();
 }
 
@@ -922,10 +987,10 @@ ipcMain.handle("pi-web-box:close-settings", () => {
   if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.close();
 });
 
-// 手动重新同步标题栏：先让页面重新上报一次主题，再强制用内置色板兜底上色。
+// 手动重新同步标题栏：让页面重新上报一次主题，再把三个窗口的标题栏都画一遍。
 ipcMain.handle("pi-web-box:refresh-titlebar", async () => {
   currentThemeBackground = "";
-  applyTitleBarTheme();
+  await applyTitleBarTheme();
   try {
     await mainWindow?.webContents.executeJavaScript(
       "window.__piWebBoxThemeSync?.report?.();", true,
@@ -933,6 +998,7 @@ ipcMain.handle("pi-web-box:refresh-titlebar", async () => {
   } catch (error) {
     log(`Could not re-report theme: ${error instanceof Error ? error.message : String(error)}`);
   }
+  applyChildTitleBarTheme();
   log("Title bar appearance refreshed manually.");
 });
 
@@ -942,6 +1008,45 @@ ipcMain.handle("pi-web-box:open-settings", (_event, pane?: string) => {
 
 ipcMain.handle("pi-web-box:open-usage", () => {
   createUsageWindow();
+});
+
+// 统计窗口加载完成后按实际内容宽度微调一次：
+// 不同 DPI 与字体下查询条件行的实际宽度会变，固定值容易折行。
+ipcMain.handle("pi-web-box:fit-usage-window", (_event, width: unknown) => {
+  if (!usageWindow || usageWindow.isDestroyed()) return false;
+  const wanted = Math.round(Number(width));
+  if (!Number.isFinite(wanted) || wanted < 640 || wanted > 2400) return false;
+  const [current] = usageWindow.getSize();
+  // 只在确实需要变宽时调整，避免反复设置尺寸引起抖动。
+  if (Math.abs(current - wanted) < 4) return true;
+  usageWindow.setContentSize(wanted, usageWindow.getContentSize()[1]);
+  log(`Usage window width adjusted to ${wanted}px.`);
+  return true;
+});
+
+/** 自绘标题栏的窗口按钮：作用于发起请求的那个窗口。 */
+function windowFromEvent(event: { sender: Electron.WebContents }): BrowserWindow | undefined {
+  const target = BrowserWindow.fromWebContents(event.sender);
+  return target && !target.isDestroyed() ? target : undefined;
+}
+
+ipcMain.handle("pi-web-box:titlebar-minimize", (event) => {
+  windowFromEvent(event)?.minimize();
+});
+
+ipcMain.handle("pi-web-box:titlebar-close", (event) => {
+  windowFromEvent(event)?.close();
+});
+
+ipcMain.handle("pi-web-box:titlebar-toggle-maximize", (event) => {
+  const target = windowFromEvent(event);
+  if (!target) return false;
+  // 设置/统计窗口不可最大化，这里只对主窗口生效。
+  if (target.isMaximizable()) {
+    if (target.isMaximized()) target.unmaximize();
+    else target.maximize();
+  }
+  return target.isMaximized();
 });
 
 // 用量统计查询：主进程直接读日志文件，渲染进程不接触文件系统。
@@ -1045,7 +1150,6 @@ if (gotLock) {
   app.whenReady().then(async () => {
     Menu.setApplicationMenu(null);
     shortcutManager = new ShortcutManager(log);
-    titleBarColorizer = new TitleBarColorizer(log);
     settingsStore = new SettingsStore(app.getPath("userData"));
     // 首次使用且存在环境变量配置时，把它们固化成设置文件，方便用户在界面里看到。
     if (!fs.existsSync(settingsStore.getFilePath())) applyEnvironmentBootstrap(settingsStore);
@@ -1055,7 +1159,7 @@ if (gotLock) {
     startRunningPoller();
     nativeTheme.on("updated", () => {
       void applySystemTheme();
-      applyTitleBarTheme();
+      void applyTitleBarTheme();
       broadcastThemeToSettings();
     });
     app.on("activate", () => { if (!mainWindow) createWindow(); else showMainWindow(); });

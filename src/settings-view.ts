@@ -1,11 +1,11 @@
 import { isDarkTheme, THEME_PALETTES, type ThemePalette } from "./themes.js";
+import { buildTitleBarHtml, TITLE_BAR_CSS, TITLE_BAR_SCRIPT } from "./titlebar-view.js";
 
 export type SettingsViewData = {
   // 当前 Pi Web 主题，用于让设置窗口跟随 Pi Web 的外观。
   theme: string;
   systemDark: boolean;
   // 品牌图标（深/浅两版），按主题切换，避免深色主题里黑 logo 看不清。
-  iconDataUrl: string;
   darkIconDataUrl: string;
   lightIconDataUrl: string;
   // 交互脚本内容。设置页写在 userData 目录下，无法直接引用 build 里的脚本文件，
@@ -22,9 +22,10 @@ const BASE_CSS = `
     font-size: 14px;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; min-height: 100vh; color: var(--text); background: var(--bg); }
-  .layout { display: grid; grid-template-columns: 178px 1fr; min-height: 100vh; }
-  .side { border-right: 1px solid var(--border); background: var(--bg-panel); padding: 16px 10px; }
+  body { margin: 0; height: 100vh; display: flex; flex-direction: column; overflow: hidden; color: var(--text); background: var(--bg); }
+  /* 自绘标题栏下方的区域铺满剩余高度：侧边栏与内容区各自滚动。 */
+  .layout { display: grid; grid-template-columns: 178px 1fr; flex: 1; min-height: 0; overflow: hidden; }
+  .side { display: flex; flex-direction: column; border-right: 1px solid var(--border); background: var(--bg-panel); padding: 16px 10px; overflow-y: auto; }
   .side .brand { display: flex; align-items: center; gap: 9px; padding: 0 8px 14px; }
   .side .brand img { width: 22px; height: 22px; }
   .side .brand b { font-size: 13.5px; font-weight: 650; }
@@ -35,8 +36,11 @@ const BASE_CSS = `
   .nav button[aria-current="true"] { background: var(--bg-hover); font-weight: 600; }
   .nav button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .nav svg { width: 15px; height: 15px; flex: none; color: var(--text-muted); }
-  .main { padding: 22px 26px 26px; overflow: auto; }
-  .pane[hidden] { display: none; }
+  .main { padding: 0; overflow: hidden; display: flex; flex-direction: column; }  /* 面板铺满内容区：中部可滚动，底部操作条固定。 */
+  .pane { flex: 1; display: flex; flex-direction: column; min-height: 0; padding: 22px 26px 0; }
+  /* 只让表单区滚动，底部操作条始终贴在最下方。 */
+  .pane-body { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 4px; }
+  .pane-foot { flex: none; padding: 12px 0 16px; background: var(--bg); border-top: 1px solid var(--border); }  .pane[hidden] { display: none; }
   h1 { font-size: 16.5px; font-weight: 650; margin: 0 0 3px; }
   .desc { margin: 0 0 18px; font-size: 12.5px; color: var(--text-muted); }
   .group { border: 1px solid var(--border); border-radius: 10px; background: var(--bg); overflow: hidden; }
@@ -84,10 +88,15 @@ const BASE_CSS = `
   select { width: 100%; padding: 7px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); color: var(--text); font: inherit; font-size: 13px; cursor: pointer; }
   select:focus { outline: 2px solid var(--accent); outline-offset: -1px; border-color: var(--accent); }
   select:disabled { opacity: .6; cursor: not-allowed; }
-  /* 自定义滚动条：跟随当前主题的边框与面板色 */
+  /* 自定义滚动条：滑块与轨道都跟随当前主题，
+     避免深色主题下露出浏览器默认的浅色滚动条。 */
   ::-webkit-scrollbar { width: 10px; height: 10px; }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 5px; border: 2px solid var(--bg); }
+  ::-webkit-scrollbar-track { background: var(--bg-panel); }
+  ::-webkit-scrollbar-thumb {
+    background: var(--scroll-thumb, var(--border));
+    border-radius: 5px;
+    border: 2px solid var(--bg-panel);
+  }
   ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
   @media (prefers-reduced-motion: reduce) { .switch .track, .switch .thumb { transition: none; } }
 `;
@@ -100,6 +109,8 @@ export function buildSettingsHtml(data: SettingsViewData): string {
   const themeVars = `
     --bg: ${palette.background};
     --bg-panel: ${palette.panel};
+    /* 自绘标题栏底色：与 pi-web 顶部工具栏同色 */
+    --titlebar-bg: ${palette.panel};
     --bg-hover: ${mix(palette.panel, palette.text, 0.06)};
     --border: ${palette.border};
     --text: ${palette.text};
@@ -114,14 +125,18 @@ export function buildSettingsHtml(data: SettingsViewData): string {
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; script-src 'unsafe-inline';" />
   <title>Pi Web Box 设置</title>
-  <style>:root {${themeVars}}${BASE_CSS}</style>
+  <style>:root {${themeVars}}${TITLE_BAR_CSS}${BASE_CSS}</style>
 </head>
 <body>
+  ${buildTitleBarHtml({
+    title: "Pi Web Box 设置",
+    iconDataUrl: isDarkTheme(palette.id) ? data.darkIconDataUrl : data.lightIconDataUrl,
+  })}
   <div class="layout">
     <aside class="side">
       <div class="brand">
         <img id="brandIcon" src="${isDarkTheme(palette.id) ? data.darkIconDataUrl : data.lightIconDataUrl}" alt="" />
-        <div><b>Pi Web Box</b><span>设置</span></div>
+        <div><b>Pi Web Box</b><span id="themeName">${escapeText(palette.label)}</span></div>
       </div>
       <nav class="nav" id="nav">
         <button type="button" data-pane="appearance" aria-current="true">
@@ -220,6 +235,7 @@ export function buildSettingsHtml(data: SettingsViewData): string {
       <section class="pane" id="pane-piweb" hidden>
         <h1>Pi Web 配置</h1>
         <p class="desc">对应 pi-web 的启动参数，保存后需要重启 Pi Web Box 生效。</p>
+        <div class="pane-body">
         <div class="group">
           <div class="row stack">
             <div>
@@ -268,16 +284,19 @@ export function buildSettingsHtml(data: SettingsViewData): string {
           </div>
         </div>
 
-        <div class="actions">
-          <button class="btn primary" type="button" id="save">保存</button>
-          <button class="btn" type="button" id="resetPiWeb">恢复默认</button>
-          <span class="spacer"></span>
-          <span class="status" id="status"></span>
         </div>
-        <p class="desc" style="margin-top:12px">当前启动命令：<code id="commandLine">—</code></p>
-        <p class="desc" id="lanRow" hidden>局域网访问地址：<code id="lanAddress">—</code>
-          <button class="btn" type="button" id="openLan" style="margin-left:6px;padding:3px 9px;font-size:12px">打开</button>
-        </p>
+        <div class="pane-foot">
+          <div class="actions" style="margin:0 0 10px">
+            <button class="btn primary" type="button" id="save">保存</button>
+            <button class="btn" type="button" id="resetPiWeb">恢复默认</button>
+            <span class="spacer"></span>
+            <span class="status" id="status"></span>
+          </div>
+          <p class="desc" style="margin:0">当前启动命令：<code id="commandLine">—</code></p>
+          <p class="desc" id="lanRow" hidden style="margin:6px 0 0">局域网访问地址：<code id="lanAddress">—</code>
+            <button class="btn" type="button" id="openLan" style="margin-left:6px;padding:3px 9px;font-size:12px">打开</button>
+          </p>
+        </div>
       </section>
 
       <section class="pane" id="pane-enhance" hidden>
@@ -351,6 +370,7 @@ export function buildSettingsHtml(data: SettingsViewData): string {
       accent: palette.accent,
     },
   }).replaceAll("<", "\\u003c")};</script>
+  <script>${TITLE_BAR_SCRIPT}</script>
   <script>${data.rendererScript}</script>
 </body>
 </html>`;
@@ -386,4 +406,9 @@ function isLight(hex: string): boolean {
 
 function escapeAttr(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, "");
+}
+
+/** 转义文本节点：保留中文等多字节字符，只处理 HTML 敏感字符。 */
+function escapeText(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
