@@ -4,10 +4,14 @@ copyright: Copyright © Pi Web Box
 electronDownload:
   mirror: https://npmmirror.com/mirrors/electron/
 asar: true
+releaseInfo:
+  releaseNotesFile: release-notes/v0.7.2.md
 directories:
   output: dist
 files:
   - build/**
+  # 冒烟测试入口不进入安装包，避免携带临时数据目录或模拟服务地址。
+  - "!build/*.smoke.js"
   - assets/**
 extraResources:
   - from: assets

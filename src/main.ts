@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, net, screen, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, screen, shell } from "electron";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
@@ -19,7 +19,10 @@ import { PiWebProcessManager } from "./pi-web-process.js";
 import { isLoopbackHostname, SettingsStore, type BoxSettings } from "./config.js";
 import { ShortcutManager, type IconTheme } from "./shortcut.js";
 import { getPalette, isKnownTheme } from "./themes.js";
-import { buildMainTitleBarScript } from "./titlebar-view.js";
+import { DesktopTabs, isServiceUrl } from "./desktop-tabs.js";
+import { NoticeStore } from "./notice-store.js";
+import { fetchSessionStatus, closeSessionStatusAgents } from "./session-status.js";
+import type { NoticeInput, NoticeQuery } from "./desktop-contracts.js";
 import {
   VersionManager,
   type InstalledVersionInfo,
@@ -44,6 +47,8 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
 
 let mainWindow: BrowserWindow | undefined;
+let desktopTabs: DesktopTabs | undefined;
+let noticeStore: NoticeStore | undefined;
 let settingsWindow: BrowserWindow | undefined;
 let usageWindow: BrowserWindow | undefined;
 let trayController: TrayController | undefined;
@@ -279,6 +284,8 @@ function showError(error: unknown): void {
     details,
     logPath: manager?.getLogPath() || path.join(app.getPath("userData"), "logs", "pi-web.log"),
   };
+  desktopTabs?.dispose();
+  desktopTabs = undefined;
   void loadLocal("error.html").finally(() => {
     mainWindow?.show();
     if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.close();
@@ -301,11 +308,11 @@ function readIconDataUrl(fileName: string): string {
   return `data:${mime};base64,${icon}`;
 }
 
-async function injectVersionPanel(): Promise<void> {
-  if (!mainWindow || mainWindow.isDestroyed() || !isPiWebPage(mainWindow.webContents.getURL())) return;
+async function injectVersionPanel(contents = desktopTabs?.active()?.view.webContents): Promise<void> {
+  if (!contents || contents.isDestroyed() || !desktopTabs || !isServiceUrl(contents.getURL(), desktopTabs.origin)) return;
   try {
     // 关于面板：版本、联系方式、设置与统计入口。
-    await mainWindow.webContents.executeJavaScript(
+    await contents.executeJavaScript(
       buildVersionPanelScript(buildPanelData()), true,
     );
   } catch (error) {
@@ -313,7 +320,7 @@ async function injectVersionPanel(): Promise<void> {
   }
   try {
     // 输入区：场景选择 + 提示词增强 + 回到底部。
-    await mainWindow.webContents.executeJavaScript(
+    await contents.executeJavaScript(
       buildEnhancePanelScript(buildEnhanceData()), true,
     );
   } catch (error) {
@@ -328,26 +335,7 @@ async function injectVersionPanel(): Promise<void> {
  */
 async function applyTitleBarTheme(): Promise<void> {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  if (!isPiWebPage(mainWindow.webContents.getURL())) return;
-  const palette = getPalette(currentTheme, nativeTheme.shouldUseDarkColors);
-  const isDark = currentTheme === "dark" || currentTheme === "pine";
-  try {
-    await mainWindow.webContents.executeJavaScript(
-      buildMainTitleBarScript({
-        title: "Pi Web Box",
-        iconDataUrl: readIconDataUrl(isDark ? "pi-logo-on-dark.svg" : "pi-logo-on-light.svg"),
-        // 与设置/统计窗口的自绘标题栏保持同一底色（页面背景）。
-        background: palette.background,
-        border: palette.border,
-        text: palette.text,
-        textMuted: palette.textMuted,
-        hover: palette.panel,
-      }),
-      true,
-    );
-  } catch (error) {
-    log(`Could not draw window title bar: ${error instanceof Error ? error.message : String(error)}`);
-  }
+  mainWindow.webContents.send("pi-web-box:desktop-theme", getPalette(currentTheme, nativeTheme.shouldUseDarkColors));
 }
 
 /**
@@ -645,33 +633,27 @@ function createUsageWindow(): void {
   });
 }
 
-/** 查询 pi-web 的运行中会话，供托盘角标与完成通知使用。 */
+let sessionPollInFlight: Promise<{ count: number; sessions: Array<{ id: string; name: string }> }> | undefined;
+let cachedSessionNames = new Map<string, string>();
+let cachedRunningIds: string[] = [];
+
+/** 名称、标签圆环、托盘共用一次查询；独立 Node 连接不与页面 SSE 争抢六条连接。 */
 async function fetchRunningSessions(): Promise<{ count: number; sessions: Array<{ id: string; name: string }> }> {
-  const port = manager?.getPort() || Number(process.env.PI_WEB_BOX_PORT) || 30141;
-  try {
-    const response = await net.fetch(`http://127.0.0.1:${port}/api/agent/running`);
-    if (!response.ok) return { count: 0, sessions: [] };
-    const data = (await response.json()) as { runningSessionIds?: unknown };
-    const ids = Array.isArray(data.runningSessionIds) ? data.runningSessionIds.filter((id): id is string => typeof id === "string") : [];
-    if (ids.length === 0) return { count: 0, sessions: [] };
-    // 会话名通过列表接口补齐，失败时用短 id 代替，不影响角标。
-    const names = new Map<string, string>();
-    try {
-      const listResponse = await net.fetch(`http://127.0.0.1:${port}/api/sessions`);
-      if (listResponse.ok) {
-        const listData = (await listResponse.json()) as { sessions?: Array<{ id?: unknown; name?: unknown }> };
-        for (const session of listData.sessions ?? []) {
-          if (typeof session.id === "string" && typeof session.name === "string") names.set(session.id, session.name);
-        }
-      }
-    } catch {
-      /* 列表取不到时宁缺勿错 */
-    }
-    return { count: ids.length, sessions: ids.map((id) => ({ id, name: names.get(id) || id.slice(0, 8) })) };
-  } catch {
-    // 服务未就绪时视为空闲，避免启动阶段误报。
-    return { count: 0, sessions: [] };
-  }
+  if (sessionPollInFlight) return sessionPollInFlight;
+  sessionPollInFlight = (async () => {
+    const port = manager?.getPort() || Number(process.env.PI_WEB_BOX_PORT) || 30141;
+    const origin = desktopTabs?.origin || `http://127.0.0.1:${port}`;
+    const status = await fetchSessionStatus(origin, settingsStore?.get().piWeb.password)
+      .catch(() => ({ names: null, runningIds: null }));
+    if (status.names) cachedSessionNames = status.names;
+    if (status.runningIds) cachedRunningIds = status.runningIds;
+    desktopTabs?.syncSessions(status.names, status.runningIds);
+    return {
+      count: cachedRunningIds.length,
+      sessions: cachedRunningIds.map((id) => ({ id, name: cachedSessionNames.get(id) || id.slice(0, 8) })),
+    };
+  })().finally(() => { sessionPollInFlight = undefined; });
+  return sessionPollInFlight;
 }
 
 /** 启动运行状态轮询：驱动托盘角标与任务完成通知。 */
@@ -692,16 +674,8 @@ async function pollRunningState(): Promise<void> {
 
 /** 在主窗口内加载指定会话，供托盘菜单跳转使用。 */
 async function openSessionInWindow(sessionId: string): Promise<void> {
-  if (!mainWindow || mainWindow.isDestroyed()) return;
   showMainWindow();
-  try {
-    await mainWindow.webContents.executeJavaScript(
-      `window.location.href = window.location.origin + "/?session=" + encodeURIComponent(${JSON.stringify(sessionId)});`,
-      true,
-    );
-  } catch (error) {
-    log(`Could not open session from tray: ${error instanceof Error ? error.message : String(error)}`);
-  }
+  desktopTabs?.openSession(sessionId);
 }
 
 async function startPiWeb(): Promise<void> {
@@ -733,7 +707,12 @@ async function startPiWeb(): Promise<void> {
       });
       const result = await manager.start();
       if (!mainWindow || mainWindow.isDestroyed()) return;
-      await mainWindow.loadURL(result.url);
+      await loadLocal("desktop.html");
+      desktopTabs?.dispose();
+      desktopTabs = new DesktopTabs(mainWindow, new URL(result.url).origin,
+        appFilePath(path.join("build", "page-preload.js")), setupTabContents, publishDesktopState);
+      desktopTabs.create(result.url);
+      void pollRunningState();
       mainWindow.show();
       mainWindow.focus();
     } catch (error) {
@@ -741,6 +720,47 @@ async function startPiWeb(): Promise<void> {
     }
   })().finally(() => { startupInFlight = undefined; });
   return startupInFlight;
+}
+
+/** 公共标题栏与子窗口只跟随当前标签的主题。 */
+function publishDesktopState(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (desktopTabs) mainWindow.webContents.send("pi-web-box:desktop-state", desktopTabs.snapshot(noticeStore?.unreadCount() ?? 0));
+  const theme = desktopTabs?.active()?.theme;
+  if (theme && theme.theme !== currentTheme) updateTheme(theme.theme, theme.background);
+  else void applyTitleBarTheme();
+}
+
+/** 保留原页面增强、外链行为和键盘操作，不在每个标签里重复绘制标题栏。 */
+function setupTabContents(contents: Electron.WebContents): void {
+  contents.setWindowOpenHandler(({ url }) => {
+    void shell.openExternal(url);
+    return { action: "deny" };
+  });
+  contents.on("will-navigate", (event, url) => {
+    if (desktopTabs && isServiceUrl(url, desktopTabs.origin)) return;
+    event.preventDefault();
+    if (/^https?:/i.test(url)) void shell.openExternal(url);
+  });
+  contents.on("did-finish-load", () => void injectVersionPanel(contents));
+  contents.on("before-input-event", handleDesktopShortcut);
+}
+
+/** 快捷键只切换页面；关闭标签不终止后台任务。 */
+function handleDesktopShortcut(event: Electron.Event, input: Electron.Input): void {
+  if (!desktopTabs || input.type !== "keyDown") return;
+  const key = input.key.toLowerCase();
+  if (input.control && key === "t") { event.preventDefault(); desktopTabs.create(); }
+  else if (input.control && key === "w") { event.preventDefault(); const tab = desktopTabs.active(); if (tab) desktopTabs.close(tab.id); }
+  else if (input.control && key === "tab") {
+    event.preventDefault();
+    const tabs = desktopTabs.all();
+    const index = tabs.findIndex((tab) => tab.id === desktopTabs?.active()?.id);
+    const next = tabs[(index + (input.shift ? -1 : 1) + tabs.length) % tabs.length];
+    if (next) desktopTabs.activate(next.id);
+  } else if (key === "f5" || (input.control && key === "r")) {
+    event.preventDefault(); desktopTabs.active()?.view.webContents.reload();
+  }
 }
 
 function createWindow(): void {
@@ -792,6 +812,7 @@ function createWindow(): void {
   mainWindow.on("unmaximize", scheduleSaveBounds);
   mainWindow.setMenu(null);
   mainWindow.setMenuBarVisibility(false);
+  mainWindow.webContents.on("before-input-event", handleDesktopShortcut);
   mainWindow.webContents.on("before-input-event", (event, input) => {
     if (input.key === "Alt" || input.code === "AltLeft" || input.code === "AltRight") event.preventDefault();
   });
@@ -828,17 +849,17 @@ function createWindow(): void {
       log("Main window hidden to tray.");
     }
   });
-  mainWindow.on("closed", () => { mainWindow = undefined; });
+  mainWindow.on("closed", () => { desktopTabs?.dispose(); desktopTabs = undefined; mainWindow = undefined; });
+  mainWindow.on("resize", () => desktopTabs?.layout());
+  // 恢复窗口时补一次有效布局，不依赖 Windows 是否同时发出 resize。
+  mainWindow.on("restore", () => desktopTabs?.layout());
   // 主窗口使用页面自绘标题栏，重新获得焦点时补画一次：
   // 主题上报可能晚于页面渲染，这里保证颜色始终与页面一致。
   mainWindow.on("focus", () => void applyTitleBarTheme());
   // 最大化状态变化时通知页面切换按钮图标（最大化 / 向下还原）。
   const notifyMaximizeState = () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
-    if (!isPiWebPage(mainWindow.webContents.getURL())) return;
-    void mainWindow.webContents.executeJavaScript(
-      `window.__piWebBoxMainTitleBar?.setMaximized?.(${mainWindow.isMaximized()});`, true,
-    ).catch(() => {});
+    publishDesktopState();
   };
   mainWindow.on("maximize", notifyMaximizeState);
   mainWindow.on("unmaximize", notifyMaximizeState);
@@ -926,6 +947,48 @@ function showMainWindow(): void {
   mainWindow.focus();
 }
 
+/** 桌面管理接口仅允许本地壳调用，页面只能上报自己的会话与通知。 */
+function isDesktopSender(event: Electron.IpcMainInvokeEvent): boolean {
+  return event.sender === mainWindow?.webContents && event.senderFrame === event.sender.mainFrame;
+}
+ipcMain.handle("pi-web-box:get-desktop-state", (event) => {
+  if (!isDesktopSender(event)) return null;
+  return desktopTabs?.snapshot(noticeStore?.unreadCount() ?? 0) ?? null;
+});
+ipcMain.handle("pi-web-box:new-tab", (event) => { if (isDesktopSender(event)) desktopTabs?.create(); });
+ipcMain.handle("pi-web-box:activate-tab", (event, id: string) => { if (isDesktopSender(event)) desktopTabs?.activate(id); });
+ipcMain.handle("pi-web-box:close-tab", (event, id: string) => { if (isDesktopSender(event)) desktopTabs?.close(id); });
+ipcMain.handle("pi-web-box:reorder-tab", (event, id: string, beforeId: string | null) => { if (isDesktopSender(event)) desktopTabs?.reorder(id, beforeId); });
+ipcMain.handle("pi-web-box:toggle-messages", (event) => { if (isDesktopSender(event)) desktopTabs?.togglePanel(); });
+ipcMain.handle("pi-web-box:query-notices", (event, query: NoticeQuery) => {
+  if (!isDesktopSender(event)) throw new Error("无权查询消息");
+  if (!noticeStore) throw new Error("消息数据库不可用，请查看日志");
+  return noticeStore.query(query);
+});
+ipcMain.handle("pi-web-box:mark-notices-read", (event, through: number) => {
+  if (!isDesktopSender(event) || !Number.isSafeInteger(through) || through < 0) return;
+  noticeStore?.markRead(through); publishDesktopState();
+});
+ipcMain.handle("pi-web-box:open-notice-session", (event, id: string) => {
+  if (isDesktopSender(event) && typeof id === "string" && id.length <= 200) void openSessionInWindow(id);
+});
+ipcMain.on("pi-web-box:report-tab", (event, report) => {
+  if (event.senderFrame !== event.sender.mainFrame) return;
+  desktopTabs?.report(event.sender, report);
+});
+ipcMain.on("pi-web-box:record-notice", (event, input: NoticeInput) => {
+  const tab = desktopTabs?.fromContents(event.sender);
+  if (!tab || event.senderFrame !== event.sender.mainFrame || !desktopTabs || !isServiceUrl(event.sender.getURL(), desktopTabs.origin)) return;
+  try {
+    const sessionId = input?.sessionId || tab.sessionId;
+    const sessionName = cachedSessionNames.get(sessionId) || (sessionId === tab.sessionId ? tab.title : "");
+    if (noticeStore?.add({ ...input, sessionName, sessionId })) {
+      mainWindow?.webContents.send("pi-web-box:notices-changed", { hasNew: true, unread: noticeStore.unreadCount() });
+      publishDesktopState();
+    }
+  } catch (error) { log(`保存通知失败：${String(error)}`); }
+});
+
 ipcMain.handle("pi-web-box:get-status", () => status);
 ipcMain.handle("pi-web-box:get-startup-progress", () => startupProgress);
 ipcMain.handle("pi-web-box:get-log-path", () => status.logPath || manager?.getLogPath() || "");
@@ -957,7 +1020,7 @@ ipcMain.handle("pi-web-box:save-settings", async (_event, input: BoxSettingsInpu
     settingsStore?.save(input);
     // 托盘开关与增强模型变更后立即生效，无需重启。
     applyTrayVisibility();
-    void injectVersionPanel();
+    for (const tab of desktopTabs?.all() ?? []) void injectVersionPanel(tab.view.webContents);
     broadcastSettingsChange();
     log("Settings saved.");
     return { ok: true, message: "已保存", snapshot: getSettingsSnapshot() };
@@ -992,7 +1055,7 @@ ipcMain.handle("pi-web-box:refresh-titlebar", async () => {
   currentThemeBackground = "";
   await applyTitleBarTheme();
   try {
-    await mainWindow?.webContents.executeJavaScript(
+    await desktopTabs?.active()?.view.webContents.executeJavaScript(
       "window.__piWebBoxThemeSync?.report?.();", true,
     );
   } catch (error) {
@@ -1026,7 +1089,7 @@ ipcMain.handle("pi-web-box:fit-usage-window", (_event, width: unknown) => {
 
 /** 自绘标题栏的窗口按钮：作用于发起请求的那个窗口。 */
 function windowFromEvent(event: { sender: Electron.WebContents }): BrowserWindow | undefined {
-  const target = BrowserWindow.fromWebContents(event.sender);
+  const target = desktopTabs?.fromContents(event.sender) ? mainWindow : BrowserWindow.fromWebContents(event.sender);
   return target && !target.isDestroyed() ? target : undefined;
 }
 
@@ -1111,8 +1174,11 @@ ipcMain.handle("pi-web-box:open-external", async (_event, url: string) => {
 });
 
 // Pi Web 页面回传主题：同步 Windows 原生标题栏，让界面保持一体感。
-ipcMain.on("pi-web-box:report-theme", (_event, report: ThemeReport) => {
-  updateTheme(report?.theme || "", report?.background || "");
+ipcMain.on("pi-web-box:report-theme", (event, report: ThemeReport) => {
+  const tab = desktopTabs?.fromContents(event.sender);
+  if (!tab || typeof report?.theme !== "string" || typeof report?.background !== "string") return;
+  tab.theme = { theme: report.theme, background: report.background };
+  if (tab.id === desktopTabs?.active()?.id) updateTheme(report.theme, report.background);
 });
 
 // 旧版本通过环境变量传配置，这里把仍在使用的值固化成设置文件，
@@ -1151,6 +1217,8 @@ if (gotLock) {
     Menu.setApplicationMenu(null);
     shortcutManager = new ShortcutManager(log);
     settingsStore = new SettingsStore(app.getPath("userData"));
+    try { noticeStore = new NoticeStore(path.join(app.getPath("userData"), "notifications.sqlite")); }
+    catch (error) { log(`消息数据库打开失败：${String(error)}`); }
     // 首次使用且存在环境变量配置时，把它们固化成设置文件，方便用户在界面里看到。
     if (!fs.existsSync(settingsStore.getFilePath())) applyEnvironmentBootstrap(settingsStore);
     createWindow();
@@ -1180,6 +1248,7 @@ if (gotLock) {
       runningPoller = undefined;
     }
     trayController?.destroy();
+    closeSessionStatusAgents();
     saveWindowBounds();
     event.preventDefault();
     void (async () => {

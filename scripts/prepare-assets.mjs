@@ -58,6 +58,9 @@ await Promise.all([
 const build = path.join(root, "build");
 await fs.mkdir(build, { recursive: true });
 await Promise.all([
+  // 桌面壳与标签栏、消息中心脚本作为本地静态页面加载。
+  fs.copyFile(path.join(root, "src", "desktop.html"), path.join(build, "desktop.html")),
+  fs.copyFile(path.join(root, "src", "desktop-renderer.js"), path.join(build, "desktop-renderer.js")),
   fs.copyFile(path.join(root, "src", "startup.html"), path.join(build, "startup.html")),
   fs.copyFile(path.join(root, "src", "startup-renderer.js"), path.join(build, "startup-renderer.js")),
   fs.copyFile(path.join(root, "src", "error.html"), path.join(build, "error.html")),

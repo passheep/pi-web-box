@@ -10,6 +10,14 @@ import type {
   UsageQuery,
 } from "./contracts.js";
 import type { ThemePalette } from "./themes.js";
+import type { DesktopState, DesktopTab, NoticeInput, NoticePage, NoticeQuery } from "./desktop-contracts.js";
+
+// 不把 Electron 事件对象传入页面；返回注销函数，避免页面重复订阅后泄漏监听器。
+function subscribe<T>(channel: string, callback: (payload: T) => void): () => void {
+  const listener = (_event: Electron.IpcRendererEvent, payload: T) => callback(payload);
+  ipcRenderer.on(channel, listener);
+  return () => { ipcRenderer.removeListener(channel, listener); };
+}
 
 // 预加载脚本同时作用在启动页、错误页、设置窗口、用量窗口和 Pi Web 页面上，
 // 这里一次暴露完整的桥接对象，各页面只调用自己需要的部分。
@@ -17,9 +25,8 @@ contextBridge.exposeInMainWorld("piWebBox", {
   // ── 启动页与错误页 ──
   getStatus: () => ipcRenderer.invoke("pi-web-box:get-status"),
   getStartupProgress: () => ipcRenderer.invoke("pi-web-box:get-startup-progress"),
-  onStartupProgress: (callback: (progress: StartupProgress) => void) => {
-    ipcRenderer.on("pi-web-box:startup-progress", (_event, progress: StartupProgress) => callback(progress));
-  },
+  onStartupProgress: (callback: (progress: StartupProgress) => void) =>
+    subscribe("pi-web-box:startup-progress", callback),
   retryStartup: () => ipcRenderer.invoke("pi-web-box:retry"),
   getLogPath: () => ipcRenderer.invoke("pi-web-box:get-log-path"),
   openLog: () => ipcRenderer.invoke("pi-web-box:open-log"),
@@ -33,9 +40,8 @@ contextBridge.exposeInMainWorld("piWebBox", {
   restartApp: () => ipcRenderer.invoke("pi-web-box:restart"),
   closeSettings: () => ipcRenderer.invoke("pi-web-box:close-settings"),
   refreshTitleBar: () => ipcRenderer.invoke("pi-web-box:refresh-titlebar"),
-  onSettingsTheme: (callback: (payload: { palette: ThemePalette; theme: string }) => void) => {
-    ipcRenderer.on("pi-web-box:settings-theme", (_event, payload) => callback(payload));
-  },
+  onSettingsTheme: (callback: (payload: { palette: ThemePalette; theme: string }) => void) =>
+    subscribe("pi-web-box:settings-theme", callback),
   // 用量记录插件的检测与一键安装
   checkUsageExtension: () => ipcRenderer.invoke("pi-web-box:check-usage-extension"),
   installUsageExtension: () => ipcRenderer.invoke("pi-web-box:install-usage-extension"),
@@ -52,6 +58,28 @@ contextBridge.exposeInMainWorld("piWebBox", {
   titleBarClose: () => ipcRenderer.invoke("pi-web-box:titlebar-close"),
   // 主窗口的标题栏额外提供最大化/还原。
   titleBarToggleMaximize: () => ipcRenderer.invoke("pi-web-box:titlebar-toggle-maximize"),
+
+  // ── 桌面标签与消息中心 ──
+  getDesktopState: (): Promise<DesktopState | null> => ipcRenderer.invoke("pi-web-box:get-desktop-state"),
+  onDesktopState: (callback: (state: DesktopState) => void) =>
+    subscribe("pi-web-box:desktop-state", callback),
+  newTab: (): Promise<void> => ipcRenderer.invoke("pi-web-box:new-tab"),
+  activateTab: (id: string): Promise<void> => ipcRenderer.invoke("pi-web-box:activate-tab", id),
+  closeTab: (id: string): Promise<void> => ipcRenderer.invoke("pi-web-box:close-tab", id),
+  reorderTab: (id: string, beforeId: string | null): Promise<void> =>
+    ipcRenderer.invoke("pi-web-box:reorder-tab", id, beforeId),
+  toggleMessages: (): Promise<void> => ipcRenderer.invoke("pi-web-box:toggle-messages"),
+  queryNotices: (query: NoticeQuery): Promise<NoticePage> => ipcRenderer.invoke("pi-web-box:query-notices", query),
+  markNoticesRead: (through: number): Promise<void> => ipcRenderer.invoke("pi-web-box:mark-notices-read", through),
+  onNoticesChanged: (callback: (payload: { hasNew: boolean; unread: number }) => void) =>
+    subscribe("pi-web-box:notices-changed", callback),
+  onDesktopTheme: (callback: (palette: ThemePalette) => void) =>
+    subscribe("pi-web-box:desktop-theme", callback),
+  openNoticeSession: (sessionId: string): Promise<void> => ipcRenderer.invoke("pi-web-box:open-notice-session", sessionId),
+  // 页面捕获仅单向上报，权限与数据校验由主进程负责。
+  recordNotice: (notice: NoticeInput): void => ipcRenderer.send("pi-web-box:record-notice", notice),
+  reportTab: (report: Pick<DesktopTab, "sessionId"> & Partial<Pick<DesktopTab, "title">>): void =>
+    ipcRenderer.send("pi-web-box:report-tab", report),
 
   // ── Pi Web 页面内注入脚本使用 ──
   openSettings: (pane?: string) => ipcRenderer.invoke("pi-web-box:open-settings", pane),
