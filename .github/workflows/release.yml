@@ -144,15 +144,18 @@ jobs:
           }
 
           try {
-            $mine = $all | Where-Object { $_.tag_name -eq $tag } | Select-Object -First 1
-            if (-not $mine) { throw "列表中没有任何 $tag 的 Release" }
-            $release = $mine
+            # 同一 tag 可能对应多条列表条目（electron-builder 重建 Release 时会残留），
+            # 单取第一条会漏资产；这里合并所有同名 tag 条目的资产名再校验。
+            $mine = @($all | Where-Object { $_.tag_name -eq $tag })
+            if ($mine.Count -eq 0) { throw "列表中没有任何 $tag 的 Release" }
+            $release = $mine[0]
           } catch {
             Emit-Note "error" "ReleaseMissing" "找不到 tag $tag 对应的 Release：$($_.Exception.Message)"
             throw "未创建 Release $tag"
           }
           Write-Host "Release: name=$($release.name) draft=$($release.draft) prerelease=$($release.prerelease)"
-          $names = @($release.assets | ForEach-Object { $_.name })
+          # 合并同名 tag 全部条目的资产名，去重后用于完整性校验。
+          $names = @($mine | ForEach-Object { $_.assets } | ForEach-Object { $_.name } | Select-Object -Unique)
           Emit-Note "warning" "ReleaseAssets" "draft=$($release.draft) assets[$($names -join ',')]"
           $missing = @()
           if (-not ($names -contains "latest.yml")) { $missing += "latest.yml" }
