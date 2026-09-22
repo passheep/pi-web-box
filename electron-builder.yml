@@ -5,7 +5,8 @@ electronDownload:
   mirror: https://npmmirror.com/mirrors/electron/
 asar: true
 releaseInfo:
-  releaseNotesFile: release-notes/v0.7.2.md
+  # Release 页展示的更新日志，与随包发布的版本保持一致。
+  releaseNotesFile: release-notes/v0.7.3.md
 directories:
   output: dist
 files:

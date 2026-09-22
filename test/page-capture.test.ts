@@ -17,6 +17,7 @@ const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve();
 function harness(initial = "http://127.0.0.1:30141/?session=alpha") {
   const notices: any[] = [];
   const reports: any[] = [];
+  const attentions: any[] = [];
   const requests: any[] = [];
   const observers: any[] = [];
   const intervals: any[] = [];
@@ -72,6 +73,7 @@ function harness(initial = "http://127.0.0.1:30141/?session=alpha") {
     piWebBox: {
       recordNotice(payload: any) { notices.push(JSON.parse(JSON.stringify(payload))); },
       reportTab(payload: any) { reports.push(JSON.parse(JSON.stringify(payload))); },
+      reportAttention(payload: any) { attentions.push(JSON.parse(JSON.stringify(payload))); },
     },
   });
   const install = () => vm.runInContext(script, c);
@@ -93,7 +95,7 @@ function harness(initial = "http://127.0.0.1:30141/?session=alpha") {
     return toast;
   };
   return {
-    c, notices, reports, requests, observers, intervals, listeners, FakeSource, install, addToast,
+    c, notices, reports, attentions, requests, observers, intervals, listeners, FakeSource, install, addToast,
     tick: async () => { for (const timer of intervals) timer.fn(); await flush(); },
     advance: (ms: number) => { now += ms; },
   };
@@ -252,4 +254,66 @@ test("IPC 失败不影响页面事件，重装不重放通知", async () => {
   assert.equal(h.notices.length, 0);
   h.install(); // 不重放 IPC 失败的通知
   assert.equal(h.notices.length, 0);
+});
+
+test("等待用户回答的弹窗按会话上报，关闭或切换会话时撤销", () => {
+  const h = harness();
+  h.install();
+  const stream = new h.c.EventSource("/api/agent/alpha/events");
+  // notify 只是展示提示，不算等待用户输入。
+  stream.emit(notify("n1"));
+  assert.deepEqual(h.attentions, []);
+  // select 带选项列表，只上报选项个数，不外传正文。
+  stream.emit({
+    type: "extension_ui_request", id: "q1", method: "select", title: "选哪个方案？",
+    options: [{ label: "A" }, { label: "B" }], credential: "不可采集",
+  });
+  assert.deepEqual(h.attentions, [{
+    sessionId: "alpha", requestId: "q1", active: true, method: "select",
+    title: "选哪个方案？", message: "", optionCount: 2,
+  }]);
+  // 同一弹窗重复下发（custom 面板每次重绘都会带同一 id）只上报一次。
+  stream.emit({ type: "extension_ui_request", id: "q1", method: "select", title: "重绘", options: [] });
+  assert.equal(h.attentions.length, 1);
+  // 关闭时撤销；重复关闭不再上报。
+  stream.emit({ type: "extension_ui_closed", id: "q1" });
+  assert.deepEqual(h.attentions.at(-1), {
+    sessionId: "alpha", requestId: "q1", active: false, method: "", title: "", message: "", optionCount: 0,
+  });
+  stream.emit({ type: "extension_ui_closed", id: "q1" });
+  assert.equal(h.attentions.length, 2);
+  // custom 面板收起时用同一个 id 重发 closed 帧，同样要撤销。
+  stream.emit({ type: "extension_ui_request", id: "q2", method: "custom", lines: ["面板内容"] });
+  stream.emit({ type: "extension_ui_request", id: "q2", method: "custom", lines: [], closed: true });
+  assert.deepEqual(h.attentions.at(-1), {
+    sessionId: "alpha", requestId: "q2", active: false, method: "", title: "", message: "", optionCount: 0,
+  });
+  // 切换会话后旧弹窗不会再有关闭事件，这里按原会话补一次撤销。
+  stream.emit({ type: "extension_ui_request", id: "q3", method: "confirm", title: "确认？", message: "删除后不可恢复" });
+  assert.equal(h.c.history.pushState(null, "", "?session=beta"), 17);
+  assert.deepEqual(h.attentions.at(-1), {
+    sessionId: "alpha", requestId: "q3", active: false, method: "", title: "", message: "", optionCount: 0,
+  });
+  assert.ok(!JSON.stringify(h.attentions).includes("不可采集"));
+  // 非本服务的地址根本不会被旁听。
+  const foreign = new h.c.EventSource("http://evil.invalid/api/agent/alpha/events");
+  foreign.emit({ type: "extension_ui_request", id: "q4", method: "input", title: "请输入" });
+  assert.ok(!h.attentions.some((item) => item.requestId === "q4"));
+});
+
+test("弹窗提醒上报失败不阻断页面事件", async () => {
+  const h = harness();
+  h.install(); await flush();
+  h.c.piWebBox.reportAttention = () => { throw Error("IPC unavailable"); };
+  const stream = new h.c.EventSource("/api/agent/alpha/events");
+  let delivered = 0;
+  stream.onmessage = () => delivered++;
+  assert.doesNotThrow(() => stream.emit({ type: "extension_ui_request", id: "q1", method: "input", title: "请输入" }));
+  await flush();
+  assert.equal(delivered, 1);
+  assert.equal(h.attentions.length, 0);
+  // 桥接恢复后新弹窗照常上报，不因上一次失败而卡住。
+  h.c.piWebBox.reportAttention = (payload: any) => { h.attentions.push(JSON.parse(JSON.stringify(payload))); };
+  stream.emit({ type: "extension_ui_request", id: "q2", method: "input", title: "请输入" });
+  assert.deepEqual(h.attentions.map((item) => item.requestId), ["q2"]);
 });

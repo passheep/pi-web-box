@@ -10,7 +10,7 @@ import type {
   UsageQuery,
 } from "./contracts.js";
 import type { ThemePalette } from "./themes.js";
-import type { DesktopState, DesktopTab, NoticeInput, NoticePage, NoticeQuery } from "./desktop-contracts.js";
+import type { AttentionReport, DesktopState, DesktopTab, NoticeInput, NoticePage, NoticeQuery } from "./desktop-contracts.js";
 
 // 不把 Electron 事件对象传入页面；返回注销函数，避免页面重复订阅后泄漏监听器。
 function subscribe<T>(channel: string, callback: (payload: T) => void): () => void {
@@ -78,6 +78,8 @@ contextBridge.exposeInMainWorld("piWebBox", {
   openNoticeSession: (sessionId: string): Promise<void> => ipcRenderer.invoke("pi-web-box:open-notice-session", sessionId),
   // 页面捕获仅单向上报，权限与数据校验由主进程负责。
   recordNotice: (notice: NoticeInput): void => ipcRenderer.send("pi-web-box:record-notice", notice),
+  // 「等待用户输入」的弹窗状态：主进程据此闪任务栏/托盘并弹系统通知。
+  reportAttention: (report: AttentionReport): void => ipcRenderer.send("pi-web-box:report-attention", report),
   reportTab: (report: Pick<DesktopTab, "sessionId"> & Partial<Pick<DesktopTab, "title">>): void =>
     ipcRenderer.send("pi-web-box:report-tab", report),
 

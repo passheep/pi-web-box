@@ -6,6 +6,7 @@ const api = window.piWebBox;
 const fields = {
   traySwitch: document.getElementById("traySwitch"),
   trayIconSwitch: document.getElementById("trayIconSwitch"),
+  notifySwitch: document.getElementById("notifySwitch"),
   port: document.getElementById("port"),
   hostname: document.getElementById("hostname"),
   allowedHosts: document.getElementById("allowedHosts"),
@@ -41,6 +42,7 @@ function setStatus(element, message, kind) {
 function renderForm(data) {
   fields.traySwitch.checked = data.settings.minimizeToTrayOnClose;
   fields.trayIconSwitch.checked = data.settings.showTrayIcon;
+  fields.notifySwitch.checked = data.settings.notifyOnPrompt;
   fields.port.value = data.settings.piWeb.port;
   fields.hostname.value = data.settings.piWeb.hostname;
   fields.allowedHosts.value = data.settings.piWeb.allowedHosts;
@@ -54,6 +56,7 @@ function collectForm() {
   return {
     minimizeToTrayOnClose: fields.traySwitch.checked,
     showTrayIcon: fields.trayIconSwitch.checked,
+    notifyOnPrompt: fields.notifySwitch.checked,
     piWeb: {
       port: fields.port.value.trim(),
       hostname: fields.hostname.value.trim(),
@@ -212,10 +215,11 @@ document.getElementById("resetPiWeb").addEventListener("click", async () => {
   setStatus(statusEl, result.ok ? "已恢复默认设置，重启后生效" : result.message, result.ok ? "ok" : "err");
 });
 
-// 两个开关都立即保存，避免用户忘记点保存。
+// 三个开关都立即保存，避免用户忘记点保存。
 for (const [element, message] of [
   [fields.traySwitch, () => (fields.traySwitch.checked ? "已开启：关闭窗口后留在托盘" : "已关闭：关闭窗口将退出应用")],
   [fields.trayIconSwitch, () => (fields.trayIconSwitch.checked ? "已开启：显示托盘图标" : "已关闭：隐藏托盘图标")],
+  [fields.notifySwitch, () => (fields.notifySwitch.checked ? "已开启：等待回答时会闪烁并通知" : "已关闭：等待回答时不再提醒")],
 ]) {
   element.addEventListener("change", async () => {
     const result = await api.saveSettings(collectForm());

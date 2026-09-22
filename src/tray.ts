@@ -1,6 +1,36 @@
 import { app, Menu, nativeImage, Notification, Tray } from "electron";
 import path from "node:path";
 
+/** 托盘与任务栏统一的图标尺寸。 */
+const TRAY_ICON_SIZE = 32;
+/** 托盘闪烁的切换间隔：太慢像卡住，太快像抖动。 */
+const TRAY_FLASH_INTERVAL_MS = 600;
+
+/** 在 BGRA 位图上画一个实心圆点（含深色描边），运行角标与闪烁高亮共用。 */
+function paintDot(
+  canvas: Buffer,
+  size: number,
+  centerX: number,
+  centerY: number,
+  radius: number,
+  color: { r: number; g: number; b: number },
+): void {
+  const ringRadius = radius + 1;
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const distance = Math.hypot(x - centerX, y - centerY);
+      if (distance > ringRadius) continue;
+      const offset = (y * size + x) * 4;
+      // Electron 的位图是 BGRA 排列。
+      const solid = distance <= radius;
+      canvas[offset] = solid ? color.b : 20;
+      canvas[offset + 1] = solid ? color.g : 20;
+      canvas[offset + 2] = solid ? color.r : 20;
+      canvas[offset + 3] = 255;
+    }
+  }
+}
+
 export type TrayCallbacks = {
   showMainWindow: () => void;
   openSettings: () => void;
@@ -21,6 +51,10 @@ export class TrayController {
   private baseIcon: Electron.NativeImage | undefined;
   private runningCount = 0;
   private lastFinishedAt = 0;
+  // 是否有弹窗等待用户回答；开启后图标在两个帧之间来回切换。
+  private attention = false;
+  private attentionPhase = false;
+  private attentionTimer: NodeJS.Timeout | undefined;
 
   constructor(
     private readonly iconPath: string,
@@ -43,48 +77,84 @@ export class TrayController {
     return this.baseIcon;
   }
 
+  /** 复制一份可写的位图并叠加角标，不改动缓存的基础图标。 */
+  private withBadge(paint: (canvas: Buffer, size: number) => void): Electron.NativeImage {
+    const base = this.getBaseIcon().resize({ width: TRAY_ICON_SIZE, height: TRAY_ICON_SIZE });
+    const canvas = Buffer.alloc(TRAY_ICON_SIZE * TRAY_ICON_SIZE * 4);
+    const src = base.toBitmap();
+    // 先复制原图，再让调用方叠加角标。
+    src.copy(canvas, 0, 0, Math.min(src.length, canvas.length));
+    paint(canvas, TRAY_ICON_SIZE);
+    return nativeImage.createFromBitmap(canvas, { width: TRAY_ICON_SIZE, height: TRAY_ICON_SIZE });
+  }
+
   /** 在图标右下角画一个状态圆点，表示有任务在运行。 */
   private buildBadgedIcon(): Electron.NativeImage {
-    const base = this.getBaseIcon().resize({ width: 32, height: 32 });
-    if (this.runningCount === 0) return base;
-    const size = 32;
-    const canvas = Buffer.alloc(size * size * 4);
-    const src = base.toBitmap();
-    // 先复制原图
-    src.copy(canvas, 0, 0, Math.min(src.length, canvas.length));
-    // 再在右下角画实心圆：绿色底 + 深色描边，深浅任务栏都能看清。
-    const radius = 5;
-    const centerX = size - radius - 2;
-    const centerY = size - radius - 2;
-    const ringRadius = radius + 1;
-    for (let y = 0; y < size; y += 1) {
-      for (let x = 0; x < size; x += 1) {
-        const distance = Math.hypot(x - centerX, y - centerY);
-        if (distance > ringRadius) continue;
-        const offset = (y * size + x) * 4;
-        // BGRA 排列
-        if (distance <= radius) {
-          canvas[offset] = 60; // B
-          canvas[offset + 1] = 190; // G
-          canvas[offset + 2] = 50; // R
-          canvas[offset + 3] = 255;
-        } else {
-          canvas[offset] = 20;
-          canvas[offset + 1] = 20;
-          canvas[offset + 2] = 20;
-          canvas[offset + 3] = 255;
-        }
-      }
+    if (this.runningCount === 0) {
+      return this.getBaseIcon().resize({ width: TRAY_ICON_SIZE, height: TRAY_ICON_SIZE });
     }
-    return nativeImage.createFromBitmap(canvas, { width: size, height: size });
+    return this.withBadge((canvas, size) => {
+      // 绿色底 + 深色描边，深浅任务栏都能看清。
+      const radius = 5;
+      paintDot(canvas, size, size - radius - 2, size - radius - 2, radius, { r: 50, g: 190, b: 60 });
+    });
+  }
+
+  /** 在图标右上角画一个橙色圆点，作为「有弹窗等待回答」的闪烁高亮帧。 */
+  private buildAttentionIcon(): Electron.NativeImage {
+    return this.withBadge((canvas, size) => {
+      const radius = 6;
+      paintDot(canvas, size, size - radius - 2, radius + 2, radius, { r: 240, g: 110, b: 40 });
+    });
+  }
+
+  /** 当前图标：基础图标 + 运行角标；闪烁的亮帧再叠加等待回答的橙点。 */
+  private applyIcon(): void {
+    if (!this.tray) return;
+    this.tray.setImage(this.attention && this.attentionPhase ? this.buildAttentionIcon() : this.buildBadgedIcon());
+  }
+
+  private applyToolTip(): void {
+    if (!this.tray) return;
+    if (this.attention) this.tray.setToolTip("Pi Web Box · 有弹窗等待你的回答");
+    else this.tray.setToolTip(this.runningCount > 0 ? `Pi Web Box · ${this.runningCount} 个会话运行中` : "Pi Web Box");
+  }
+
+  /** 闪烁定时器跟随 attention 开关；托盘销毁后重建也能自动恢复。 */
+  private syncAttentionTimer(): void {
+    if (this.attention && !this.attentionTimer) {
+      this.attentionTimer = setInterval(() => {
+        this.attentionPhase = !this.attentionPhase;
+        this.applyIcon();
+      }, TRAY_FLASH_INTERVAL_MS);
+    } else if (!this.attention && this.attentionTimer) {
+      clearInterval(this.attentionTimer);
+      this.attentionTimer = undefined;
+      this.attentionPhase = false;
+    }
+  }
+
+  /**
+   * 托盘闪烁开关。窗口隐藏到托盘时任务栏没有按钮可闪，
+   * 这时让图标在「普通」与「高亮」之间切换，作为唯一可见的提醒通道。
+   */
+  setAttention(active: boolean): void {
+    if (this.attention === active) return;
+    this.attention = active;
+    this.syncAttentionTimer();
+    this.applyIcon();
+    this.applyToolTip();
+    void this.refreshMenu();
   }
 
   private create(): void {
     if (this.tray) return;
     try {
       this.tray = new Tray(this.buildBadgedIcon());
-      this.tray.setToolTip("Pi Web Box");
       this.tray.on("double-click", () => this.callbacks.showMainWindow());
+      this.syncAttentionTimer();
+      this.applyIcon();
+      this.applyToolTip();
       void this.refreshMenu();
       this.log("Tray icon created.");
     } catch (error) {
@@ -94,6 +164,9 @@ export class TrayController {
   }
 
   destroy(): void {
+    // 只停定时器、保留 attention 标志：托盘重新打开后闪烁能自动接上。
+    clearInterval(this.attentionTimer);
+    this.attentionTimer = undefined;
     this.tray?.destroy();
     this.tray = undefined;
   }
@@ -108,7 +181,9 @@ export class TrayController {
     }));
     this.tray.setContextMenu(Menu.buildFromTemplate([
       {
-        label: this.runningCount > 0 ? `Pi Web Box · ${this.runningCount} 个会话运行中` : "显示 Pi Web Box",
+        label: this.attention
+          ? "Pi Web Box · 有弹窗等待你的回答"
+          : this.runningCount > 0 ? `Pi Web Box · ${this.runningCount} 个会话运行中` : "显示 Pi Web Box",
         click: () => this.callbacks.showMainWindow(),
       },
       { type: "separator" },
@@ -131,8 +206,8 @@ export class TrayController {
     this.runningCount = count;
     const justFinished = previous > 0 && count === 0;
     if (this.tray) {
-      this.tray.setImage(this.buildBadgedIcon());
-      this.tray.setToolTip(count > 0 ? `Pi Web Box · ${count} 个会话运行中` : "Pi Web Box");
+      this.applyIcon();
+      this.applyToolTip();
       void this.refreshMenu();
     }
     if (justFinished) {

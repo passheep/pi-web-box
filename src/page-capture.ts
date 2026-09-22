@@ -38,12 +38,37 @@ export function installPageCapture(): void {
       return /^[a-zA-Z0-9_-]{1,200}$/.test(id) ? id : "";
     } catch { return ""; }
   };
+  // 需要用户回答的扩展弹窗方法；notify / setStatus / setWidget 只做展示，不算等待输入。
+  const attentionMethods = ["select", "confirm", "input", "editor", "custom"];
+  // 待回答弹窗：requestId -> 所属会话 id，关闭或切换会话时按原会话撤销。
+  const waiting = new Map<string, string>();
+  const reportWaiting = (requestId: string, id: string, active: boolean, data?: any): void => {
+    if (active) {
+      // 同一弹窗会重复下发（custom 面板每次重绘都会带同一 id），只上报第一次。
+      if (waiting.has(requestId)) return;
+      waiting.set(requestId, id);
+    } else if (!waiting.delete(requestId)) return;
+    callBridge("reportAttention", {
+      sessionId: id,
+      requestId,
+      active,
+      method: clean(data?.method),
+      title: clean(data?.title),
+      message: clean(data?.message),
+      optionCount: Array.isArray(data?.options) ? data.options.length : 0,
+    });
+  };
+  // 会话切换后旧弹窗不会再有关闭事件，这里统一撤销，避免提醒一直挂着。
+  const clearWaiting = (): void => {
+    for (const [requestId, id] of [...waiting]) reportWaiting(requestId, id, false);
+  };
   // 只做本地路由同步，不发起任何网络请求。
   const syncRoute = (): void => {
     try {
       const next = readSession();
       if (initialized && next === sessionId) return;
       initialized = true;
+      clearWaiting();
       sessionId = next;
       recent = [];
       callBridge("reportTab", { sessionId });
@@ -67,6 +92,17 @@ export function installPageCapture(): void {
               try {
                 if (typeof event.data !== "string") return;
                 const data = JSON.parse(event.data);
+                // 等待用户回答的弹窗：出现时上报提醒，关闭时撤销。
+                if (data?.type === "extension_ui_request" && typeof data.id === "string" && attentionMethods.includes(data.method)) {
+                  // custom 面板收起时会带 closed 重发同一个 id。
+                  if (data.closed === true) reportWaiting(data.id, id, false);
+                  else reportWaiting(data.id, id, true, data);
+                  return;
+                }
+                if (data?.type === "extension_ui_closed" && typeof data.id === "string") {
+                  reportWaiting(data.id, id, false);
+                  return;
+                }
                 let message: string;
                 let level: string;
                 if (data?.type === "extension_ui_request" && data.method === "notify") {

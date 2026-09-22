@@ -193,6 +193,18 @@ export function buildSettingsHtml(data: SettingsViewData): string {
           </div>
           <div class="row">
             <div>
+              <div class="label">等待回答时提醒</div>
+              <div class="hint">开启后，Pi Web 弹出需要你回答的询问时，会闪烁任务栏按钮（窗口已隐藏到托盘则改为闪烁托盘图标）并发送系统通知，点击通知直接跳到对应会话；窗口重新获得焦点即停止提醒。</div>
+            </div>
+            <div class="control">
+              <label class="switch" title="等待回答时提醒">
+                <input type="checkbox" id="notifySwitch" />
+                <span class="track"></span><span class="thumb"></span>
+              </label>
+            </div>
+          </div>
+          <div class="row">
+            <div>
               <div class="label">刷新标题栏外观</div>
               <div class="hint">标题栏一般会自动跟随 Pi Web 主题。若切换主题后标题栏颜色没有更新，可点此手动同步一次。</div>
             </div>

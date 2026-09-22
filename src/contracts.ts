@@ -16,6 +16,8 @@ export type ComponentVersions = {
 export type BoxSettingsInput = {
   minimizeToTrayOnClose: boolean;
   showTrayIcon: boolean;
+  // 等待用户回答的弹窗是否提醒（闪任务栏/托盘 + 系统通知）。
+  notifyOnPrompt: boolean;
   piWeb: {
     port: string;
     hostname: string;

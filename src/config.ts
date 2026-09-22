@@ -33,6 +33,8 @@ export type BoxSettings = {
   minimizeToTrayOnClose: boolean;
   // 是否在通知区域显示托盘图标。
   showTrayIcon: boolean;
+  // 等待用户回答的弹窗是否提醒：闪任务栏/托盘并发系统通知。
+  notifyOnPrompt: boolean;
   piWeb: PiWebConfig;
   enhance: EnhanceConfig;
   window: WindowBounds;
@@ -41,6 +43,7 @@ export type BoxSettings = {
 export const DEFAULT_SETTINGS: BoxSettings = {
   minimizeToTrayOnClose: true,
   showTrayIcon: true,
+  notifyOnPrompt: true,
   piWeb: {
     port: "30141",
     hostname: "127.0.0.1",
@@ -163,6 +166,8 @@ export function normalizeSettings(raw: unknown): BoxSettings {
         : DEFAULT_SETTINGS.minimizeToTrayOnClose,
     showTrayIcon:
       typeof source.showTrayIcon === "boolean" ? source.showTrayIcon : DEFAULT_SETTINGS.showTrayIcon,
+    notifyOnPrompt:
+      typeof source.notifyOnPrompt === "boolean" ? source.notifyOnPrompt : DEFAULT_SETTINGS.notifyOnPrompt,
     piWeb: {
       port: text(piWeb.port, DEFAULT_SETTINGS.piWeb.port),
       hostname: text(piWeb.hostname, DEFAULT_SETTINGS.piWeb.hostname),

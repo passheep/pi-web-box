@@ -69,3 +69,10 @@ test("normalizeSettings keeps explicit false for the tray switch", () => {
   const normalized = normalizeSettings({ minimizeToTrayOnClose: false });
   assert.equal(normalized.minimizeToTrayOnClose, false);
 });
+
+test("normalizeSettings defaults the prompt notification switch to on", () => {
+  // 缺字段时默认开启：老配置文件升级后不需要手动打开提醒。
+  assert.equal(normalizeSettings({}).notifyOnPrompt, true);
+  assert.equal(normalizeSettings({ notifyOnPrompt: "yes" }).notifyOnPrompt, true);
+  assert.equal(normalizeSettings({ notifyOnPrompt: false }).notifyOnPrompt, false);
+});

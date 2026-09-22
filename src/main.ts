@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, screen, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeTheme, Notification, screen, shell } from "electron";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
@@ -22,7 +22,8 @@ import { getPalette, isKnownTheme } from "./themes.js";
 import { DesktopTabs, isServiceUrl } from "./desktop-tabs.js";
 import { NoticeStore } from "./notice-store.js";
 import { fetchSessionStatus, closeSessionStatusAgents } from "./session-status.js";
-import type { NoticeInput, NoticeQuery } from "./desktop-contracts.js";
+import { AttentionController, type AttentionNotice } from "./attention.js";
+import type { AttentionReport, NoticeInput, NoticeQuery } from "./desktop-contracts.js";
 import {
   VersionManager,
   type InstalledVersionInfo,
@@ -52,6 +53,7 @@ let noticeStore: NoticeStore | undefined;
 let settingsWindow: BrowserWindow | undefined;
 let usageWindow: BrowserWindow | undefined;
 let trayController: TrayController | undefined;
+let attention: AttentionController | undefined;
 let runningPoller: NodeJS.Timeout | undefined;
 let manager: PiWebProcessManager | undefined;
 let shortcutManager: ShortcutManager | undefined;
@@ -672,10 +674,40 @@ async function pollRunningState(): Promise<void> {
   runningState = { runningCount: count, justFinished };
 }
 
-/** 在主窗口内加载指定会话，供托盘菜单跳转使用。 */
+/** 在主窗口内加载指定会话，供托盘菜单与系统通知跳转使用。 */
 async function openSessionInWindow(sessionId: string): Promise<void> {
   showMainWindow();
   desktopTabs?.openSession(sessionId);
+}
+
+/**
+ * 询问提醒的系统通知：点击后打开窗口并切到对应会话。
+ * 走 Electron 原生通知（与托盘「任务完成」通知同一条通道），不依赖页面通知权限。
+ */
+function notifyAttention(notice: AttentionNotice): void {
+  try {
+    if (!Notification.isSupported()) return;
+    const notification = new Notification({ title: notice.title, body: notice.body, silent: false });
+    notification.on("click", () => { void openSessionInWindow(notice.sessionId); });
+    notification.show();
+  } catch (error) {
+    log(`Could not show attention notification: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** 询问提醒控制器：页面弹窗等待回答时闪任务栏 / 托盘，并发一条系统通知。 */
+function ensureAttention(): AttentionController {
+  attention ??= new AttentionController({
+    enabled: () => settingsStore?.get().notifyOnPrompt ?? true,
+    isFocused: () => !!mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused(),
+    isVisible: () => !!mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible(),
+    flash: (active) => { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.flashFrame(active); },
+    setTrayAttention: (active) => trayController?.setAttention(active),
+    notify: notifyAttention,
+    sessionName: (sessionId) => cachedSessionNames.get(sessionId) || "",
+    log,
+  });
+  return attention;
 }
 
 async function startPiWeb(): Promise<void> {
@@ -744,6 +776,12 @@ function setupTabContents(contents: Electron.WebContents): void {
   });
   contents.on("did-finish-load", () => void injectVersionPanel(contents));
   contents.on("before-input-event", handleDesktopShortcut);
+  // 页面整体重载或标签关闭后，页面里的弹窗已经不存在，撤销该标签的等待状态。
+  const tabId = desktopTabs?.fromContents(contents)?.id;
+  if (tabId) {
+    contents.on("did-start-navigation", (details) => { if (!details.isSameDocument) attention?.clearTab(tabId); });
+    contents.on("destroyed", () => attention?.clearTab(tabId));
+  }
 }
 
 /** 快捷键只切换页面；关闭标签不终止后台任务。 */
@@ -855,7 +893,12 @@ function createWindow(): void {
   mainWindow.on("restore", () => desktopTabs?.layout());
   // 主窗口使用页面自绘标题栏，重新获得焦点时补画一次：
   // 主题上报可能晚于页面渲染，这里保证颜色始终与页面一致。
-  mainWindow.on("focus", () => void applyTitleBarTheme());
+  // 同时把「窗口重新获得焦点」当作提醒的停止条件：用户已经看到窗口。
+  mainWindow.on("focus", () => { ensureAttention().clearAll(); void applyTitleBarTheme(); });
+  // 显示状态变化时重新挑选提醒通道：任务栏可见闪按钮，隐藏到托盘改闪托盘图标。
+  mainWindow.on("blur", () => ensureAttention().refresh());
+  mainWindow.on("show", () => ensureAttention().refresh());
+  mainWindow.on("hide", () => ensureAttention().refresh());
   // 最大化状态变化时通知页面切换按钮图标（最大化 / 向下还原）。
   const notifyMaximizeState = () => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -863,6 +906,8 @@ function createWindow(): void {
   };
   mainWindow.on("maximize", notifyMaximizeState);
   mainWindow.on("unmaximize", notifyMaximizeState);
+  // 提前建好控制器：标签页创建后上报的弹窗状态要立刻能接上提醒。
+  ensureAttention();
   void startPiWeb();
 }
 
@@ -989,6 +1034,32 @@ ipcMain.on("pi-web-box:record-notice", (event, input: NoticeInput) => {
   } catch (error) { log(`保存通知失败：${String(error)}`); }
 });
 
+// 页面检测到「等待用户输入」弹窗：只上报状态，提醒方式由主进程决定。
+ipcMain.on("pi-web-box:report-attention", (event, report: AttentionReport) => {
+  const tab = desktopTabs?.fromContents(event.sender);
+  if (!tab || event.senderFrame !== event.sender.mainFrame || !desktopTabs || !isServiceUrl(event.sender.getURL(), desktopTabs.origin)) return;
+  const requestId = typeof report?.requestId === "string" ? report.requestId.slice(0, 200) : "";
+  if (!requestId) return;
+  const sessionId = typeof report.sessionId === "string" && report.sessionId ? report.sessionId : tab.sessionId;
+  if (report.active !== true) {
+    ensureAttention().resolve(tab.id, requestId);
+    return;
+  }
+  // 只记会话与方法，不把弹窗正文写进日志。
+  log(`检测到等待回答的弹窗：会话 ${sessionId || "未知"}（${typeof report.method === "string" && report.method ? report.method : "未知"}）。`);
+  ensureAttention().raise({
+    tabId: tab.id,
+    sessionId,
+    requestId,
+    method: typeof report.method === "string" ? report.method.slice(0, 40) : "",
+    title: typeof report.title === "string" ? report.title.slice(0, 2000) : "",
+    message: typeof report.message === "string" ? report.message.slice(0, 2000) : "",
+    optionCount: typeof report.optionCount === "number" && Number.isFinite(report.optionCount)
+      ? Math.max(0, Math.floor(report.optionCount))
+      : 0,
+  });
+});
+
 ipcMain.handle("pi-web-box:get-status", () => status);
 ipcMain.handle("pi-web-box:get-startup-progress", () => startupProgress);
 ipcMain.handle("pi-web-box:get-log-path", () => status.logPath || manager?.getLogPath() || "");
@@ -1020,6 +1091,8 @@ ipcMain.handle("pi-web-box:save-settings", async (_event, input: BoxSettingsInpu
     settingsStore?.save(input);
     // 托盘开关与增强模型变更后立即生效，无需重启。
     applyTrayVisibility();
+    // 提醒开关可能刚被关掉：立刻按新设置重算闪烁状态。
+    attention?.refresh();
     for (const tab of desktopTabs?.all() ?? []) void injectVersionPanel(tab.view.webContents);
     broadcastSettingsChange();
     log("Settings saved.");
@@ -1033,6 +1106,7 @@ ipcMain.handle("pi-web-box:reset-settings", async (): Promise<SaveSettingsResult
   try {
     settingsStore?.reset();
     applyTrayVisibility();
+    attention?.refresh();
     broadcastSettingsChange();
     log("Settings reset to defaults.");
     return { ok: true, message: "已恢复默认设置", snapshot: getSettingsSnapshot() };
