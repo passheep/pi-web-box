@@ -30,9 +30,14 @@ const server = http.createServer((req, res) => {
     streams.add(res); res.on("close", () => streams.delete(res));
   } else {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-    res.end(`<!doctype html><meta charset="utf-8"><title>测试页面</title><script>
+    res.end(`<!doctype html><meta charset="utf-8"><title>测试页面</title><body>
+    <!-- 模拟 pi-web 输入框上方工具栏：标题为 “Change model” 的按钮是增强控件的锚点 -->
+    <div id="toolbar"><div class="group"><button id="modelBtn" title="Change model">模型</button></div></div>
+    <textarea class="chat-input-textarea"></textarea>
+    <script>
       const id = new URL(location.href).searchParams.get('session');
-      if (id) window.source = new EventSource('/api/agent/'+id+'/events');
+      // 没有 session 参数时模拟 pi-web 首屏自动打开上次会话：只建立事件流，不改 URL。
+      window.source = new EventSource('/api/agent/' + (id || 's1') + '/events');
     </script>`);
   }
 });
@@ -119,16 +124,20 @@ async function queryStatus(origin) { const result = await fetchSessionStatus(ori
   assert.ok(records.every((record) => record.message === `中文通知-${record.sessionId}`));
   console.log("PASS middle click / reopen color reuse / all six SSE notices exact");
   // 复现 Pi Web 的 640px 窄屏收栏规则，验证真实 Windows 最小化不会误触发。
+  // 最小化期间 Windows 偶尔会先上报一个极小尺寸再恢复，那属于系统行为、不是应用的布局结果，
+  // 这里给事件带上最小化标记，只要求「非最小化状态下不出现窄屏事件」。
   const page = tabs.active().view.webContents;
   await checkUntil(() => !page.isLoading(), "测试页面未加载完成");
   await page.executeJavaScript(`window.sidebarOpen = true; window.narrowEvents = [];
     matchMedia('(max-width: 640px)').addEventListener('change', event => {
-      narrowEvents.push(event.matches); if (event.matches) sidebarOpen = false;
+      narrowEvents.push({ matches: event.matches, minimized: !!window.__boxMinimized });
+      if (event.matches && !window.__boxMinimized) sidebarOpen = false;
     }); void 0;`);
   for (const maximized of [false, true]) {
     if (maximized) win.maximize();
     await wait(400);
     const bounds = tabs.all().map(tab => tab.view.getBounds());
+    await page.executeJavaScript("window.__boxMinimized = true; void 0");
     win.minimize();
     await wait(400);
     assert.equal(win.isMinimized(), true);
@@ -136,10 +145,77 @@ async function queryStatus(origin) { const result = await fetchSessionStatus(ori
     assert.deepEqual(tabs.all().map(tab => tab.view.getBounds()), bounds);
     win.restore();
     await wait(500);
-    assert.equal(await page.executeJavaScript("sidebarOpen && !narrowEvents.includes(true)"), true);
+    await page.executeJavaScript("window.__boxMinimized = false; void 0");
+    assert.equal(await page.executeJavaScript("sidebarOpen && !narrowEvents.some(e => e.matches && !e.minimized)"), true);
     assert.equal(tabs.active().view.getBounds().width, win.getContentSize()[0]);
   }
   console.log("PASS normal/maximized minimize-restore / six page bounds preserved / sidebar stays open");
+  // 复现 pi-web 首屏自动打开上次会话：页面不改 URL，只建立会话事件流，
+  // 标签归属与标题必须由事件流补上（回归：此前会一直显示“新标签页”）。
+  tabs.close(tabs.all()[0].id);
+  await checkUntil(() => tabs.all().length === 5, "关闭标签失败");
+  tabs.create(origin);
+  await checkUntil(
+    () => tabs.all().some((tab) => tab.sessionId === "s1" && tab.title === "测试会话1已改名"),
+    "无 session 参数的标签未按事件流识别会话",
+  );
+  console.log("PASS 无 URL session 参数时按事件流识别会话并显示会话名");
+  // 主题实时跟随：主进程推送页面实测色板后，标签栏变量立即更新。
+  win.webContents.send("pi-web-box:desktop-theme", {
+    id: "sand", label: "暖沙", background: "#faf6ee", panel: "#f1ebdf", border: "#cdbfa6",
+    text: "#2e2a22", textMuted: "#5c5243", accent: "#7a4f10",
+  });
+  await checkUntil(
+    async () => (await win.webContents.executeJavaScript("getComputedStyle(document.documentElement).getPropertyValue('--bg-panel').trim()")) === "#f1ebdf",
+    "标签栏未跟随主题色板",
+  );
+  console.log("PASS 标签栏跟随主进程推送的实时色板");
+  // 「生成标题」：控件注入 pi-web 页面后，点击按钮要能走通主进程桥接
+  //（真实命名流程由 test/session-title.test.ts 覆盖，这里只看接线）。
+  const { buildEnhancePanelScript } = require("../build/enhance-panel.js");
+  const { THEME_PALETTES } = require("../build/themes.js");
+  let titleCalls = 0;
+  ipcMain.handle("pi-web-box:generate-session-title", () => {
+    titleCalls += 1;
+    return { ok: true, name: "20261016-测试标题" };
+  });
+  const panelPage = tabs.active().view.webContents;
+  await checkUntil(
+    () => panelPage.executeJavaScript(`!!document.querySelector('button[title="Change model"]')`),
+    "测试页面缺少模型按钮锚点",
+  );
+  await panelPage.executeJavaScript(buildEnhancePanelScript({
+    palette: THEME_PALETTES.light,
+    configured: true,
+    titleConfigured: true,
+    titleModelLabel: "magpie/workbuddy2api/Deepseek-V4.1-Flash",
+    scenes: [{ id: "general", label: "通用" }],
+    defaultScene: "general",
+  }), true);
+  await checkUntil(
+    () => panelPage.executeJavaScript(`!!document.getElementById("pi-web-box-enhance")`),
+    "增强控件未注入页面",
+  );
+  const panel = await panelPage.executeJavaScript(`(() => {
+    const host = document.getElementById("pi-web-box-enhance");
+    const root = host.shadowRoot;
+    return {
+      labels: [...root.querySelector(".wrap").querySelectorAll("button")].map((button) => button.textContent.trim()),
+      titleTooltip: root.getElementById("title").title,
+      anchoredInToolbar: host.parentElement.id === "toolbar",
+    };
+  })()`);
+  // 工具栏按钮顺序：增强 → 生成标题（紧接着，回到底部是悬浮按钮排在后面）。
+  assert.deepEqual(panel.labels.slice(0, 2), ["增强", "生成标题"]);
+  assert.equal(panel.anchoredInToolbar, true);
+  assert.match(panel.titleTooltip, /magpie\/workbuddy2api\/Deepseek-V4\.1-Flash/);
+  await panelPage.executeJavaScript(`document.getElementById("pi-web-box-enhance").shadowRoot.getElementById("title").click(); void 0`);
+  await checkUntil(
+    async () => (await panelPage.executeJavaScript(`document.getElementById("pi-web-box-enhance").shadowRoot.getElementById("toast").textContent`)).includes("测试标题"),
+    "点击生成标题后未回显新标题",
+  );
+  assert.equal(titleCalls, 1);
+  console.log("PASS 「生成标题」按钮位于「增强」右侧，点击后经主进程写回并回显新标题");
   assert.equal(errors.length, 0, errors.join("\n"));
 })().then(() => finish(0), (error) => { console.error(error); finish(1); });
 function finish(code) {

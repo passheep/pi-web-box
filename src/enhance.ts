@@ -203,6 +203,7 @@ function buildRequestBody(
   model: string,
   systemPrompt: string,
   draft: string,
+  maxTokens: number,
 ): Record<string, unknown> {
   if (api === "openai-completions") {
     return {
@@ -211,8 +212,8 @@ function buildRequestBody(
         { role: "system", content: systemPrompt },
         { role: "user", content: draft },
       ],
-      max_tokens: 8192,
-      // 关闭思考，增强属于改写任务，不需要推理开销。
+      max_tokens: maxTokens,
+      // 关闭思考：改写与命名都是短任务，不需要推理开销。
       thinking: { type: "disabled" },
       stream: false,
     };
@@ -222,7 +223,7 @@ function buildRequestBody(
     model,
     instructions: systemPrompt,
     input: [{ role: "user", content: [{ type: "input_text", text: draft }] }],
-    max_output_tokens: 8192,
+    max_output_tokens: maxTokens,
     reasoning: { effort: "none" },
     store: false,
     stream: false,
@@ -252,35 +253,38 @@ export function extractResponseText(api: string, body: unknown): string {
   return text;
 }
 
+export type ModelCompletionResult = { ok: true; text: string } | { ok: false; message: string };
+
 /**
- * 调用 LLM 改写提示词。整个过程只在主进程发起，API Key 不写入日志、
-// 不传递给渲染进程，避免泄露。
+ * 调用 pi 中已配置的模型并返回正文。
+ * 提示词增强与「生成标题」共用同一套请求参数、超时与错误文案：
+ * API Key 只在主进程使用，不写日志、不传给渲染进程。
  */
-export async function enhancePrompt(options: {
+export async function completeWithModel(options: {
   provider: string;
   model: string;
-  scene: string;
-  draft: string;
+  systemPrompt: string;
+  userText: string;
+  maxTokens?: number;
+  timeoutMs?: number;
   signal?: AbortSignal;
-}): Promise<EnhanceResult> {
-  const draftText = options.draft ?? "";
-  if (!draftText.trim()) return { ok: false, message: "输入框内容为空，无需增强。" };
-  if (draftText.length > MAX_INPUT_LENGTH) {
-    return { ok: false, message: `原文超过 ${MAX_INPUT_LENGTH} 字符，请先精简后再增强。` };
-  }
-
+}): Promise<ModelCompletionResult> {
   const target = readEnhanceTarget({ provider: options.provider, model: options.model });
   if (!target.ok) return { ok: false, message: target.message };
 
-  const scene = SCENE_PROMPTS[options.scene] ?? SCENE_PROMPTS.general;
-  const systemPrompt = `${BASE_RULES}\n\n场景补充：${scene.hint}`;
-
-  const protectedDraft = protectDraft(draftText);
-  const body = buildRequestBody(target.api, target.model, systemPrompt, protectedDraft.text);
-  const endpoint = target.api === "openai-completions" ? `${target.baseUrl}/chat/completions` : `${target.baseUrl}/responses`;
+  const body = buildRequestBody(
+    target.api,
+    target.model,
+    options.systemPrompt,
+    options.userText,
+    options.maxTokens ?? 8192,
+  );
+  const endpoint = target.api === "openai-completions"
+    ? `${target.baseUrl}/chat/completions`
+    : `${target.baseUrl}/responses`;
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? REQUEST_TIMEOUT_MS);
   const onAbort = () => controller.abort();
   options.signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -301,13 +305,7 @@ export async function enhancePrompt(options: {
     const json = await response.json();
     const text = extractResponseText(target.api, json).trim();
     if (!text) return { ok: false, message: "模型返回了空内容，请重试。" };
-    let restored: string;
-    try {
-      restored = restoreDraft(text, protectedDraft);
-    } catch (error) {
-      return { ok: false, message: error instanceof Error ? error.message : String(error) };
-    }
-    return { ok: true, text: restored };
+    return { ok: true, text };
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
       return { ok: false, message: "请求超时或已取消。" };
@@ -316,5 +314,41 @@ export async function enhancePrompt(options: {
   } finally {
     clearTimeout(timer);
     options.signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+/**
+ * 调用 LLM 改写提示词。整个过程只在主进程发起，API Key 不写入日志、
+// 不传递给渲染进程，避免泄露。
+ */
+export async function enhancePrompt(options: {
+  provider: string;
+  model: string;
+  scene: string;
+  draft: string;
+  signal?: AbortSignal;
+}): Promise<EnhanceResult> {
+  const draftText = options.draft ?? "";
+  if (!draftText.trim()) return { ok: false, message: "输入框内容为空，无需增强。" };
+  if (draftText.length > MAX_INPUT_LENGTH) {
+    return { ok: false, message: `原文超过 ${MAX_INPUT_LENGTH} 字符，请先精简后再增强。` };
+  }
+
+  const scene = SCENE_PROMPTS[options.scene] ?? SCENE_PROMPTS.general;
+  const systemPrompt = `${BASE_RULES}\n\n场景补充：${scene.hint}`;
+
+  const protectedDraft = protectDraft(draftText);
+  const completion = await completeWithModel({
+    provider: options.provider,
+    model: options.model,
+    systemPrompt,
+    userText: protectedDraft.text,
+    signal: options.signal,
+  });
+  if (!completion.ok) return { ok: false, message: completion.message };
+  try {
+    return { ok: true, text: restoreDraft(completion.text, protectedDraft) };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
   }
 }

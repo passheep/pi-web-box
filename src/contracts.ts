@@ -6,6 +6,17 @@ export type StartupProgress = {
   indeterminate?: boolean;
 };
 
+/**
+ * 启动页 / 错误页读到的状态。
+ * kind 用于让错误页按失败原因切换文案与按钮（例如缺少 npm 时给出下载入口）。
+ */
+export type StatusReport = {
+  message: string;
+  details: string;
+  logPath: string;
+  kind?: string;
+};
+
 export type ComponentVersions = {
   pi: string;
   piWeb: string;
@@ -51,6 +62,31 @@ export type ExtensionInfo = {
   upToDate: boolean;
 };
 
+// pi 的本地目录与全局 AGENTS.md，供「Pi 配置」面板展示与打开。
+export type PiPaths = {
+  directory: string;
+  directoryExists: boolean;
+  agentsFile: string;
+  agentsExists: boolean;
+};
+
+// 会话命名配置：是否自动命名 + 命名使用的模型。
+export type SessionNameConfig = {
+  enabled: boolean;
+  provider: string;
+  model: string;
+};
+
+// 「生成标题」的结果：成功时带回写好的完整会话名。
+export type SessionTitleResult = { ok: true; name: string } | { ok: false; message: string };
+
+// 会话命名面板一次拿到的状态：配置、配置文件位置与插件安装情况。
+export type SessionNameState = {
+  config: SessionNameConfig;
+  configPath: string;
+  extension: ExtensionInfo;
+};
+
 // 设置窗口一次拿到的完整状态，包含只读的展示信息。
 export type SettingsSnapshot = {
   settings: BoxSettingsInput;
@@ -64,6 +100,10 @@ export type SettingsSnapshot = {
   providers: ProviderOption[];
   // 用量记录插件的安装状态。
   usageExtension: ExtensionInfo;
+  // pi 的本地目录与全局 AGENTS.md。
+  pi: PiPaths;
+  // 会话命名插件与配置。
+  sessionName: SessionNameState;
   // 内网访问地址，仅在监听非回环地址时给出。
   lanAddress: string;
   // 关于信息。
@@ -83,11 +123,22 @@ export type SaveSettingsResult = {
   snapshot?: SettingsSnapshot;
 };
 
-// Pi Web 页面把当前主题回传给主进程，用于同步 Windows 标题栏。
+// 页面实时色板：直接来自 pi-web 的 CSS 变量，缺失或非法字段由主进程回退到内置色板。
+export type ThemePaletteReport = {
+  background?: string;
+  panel?: string;
+  border?: string;
+  text?: string;
+  textMuted?: string;
+  accent?: string;
+};
+
+// Pi Web 页面把当前主题回传给主进程，用于同步标题栏与子窗口配色。
 export type ThemeReport = {
   theme: string;
   background: string;
   isDark?: boolean;
+  palette?: ThemePaletteReport;
 };
 
 // Pi Web 页面的运行状态，用于托盘角标与完成通知。

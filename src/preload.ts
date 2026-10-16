@@ -3,9 +3,13 @@ import type {
   BoxSettingsInput,
   EnhanceRequest,
   EnhanceResponse,
+  ExtensionInfo,
   SaveSettingsResult,
+  SessionNameConfig,
+  SessionTitleResult,
   SettingsSnapshot,
   StartupProgress,
+  StatusReport,
   ThemeReport,
   UsageQuery,
 } from "./contracts.js";
@@ -23,7 +27,7 @@ function subscribe<T>(channel: string, callback: (payload: T) => void): () => vo
 // 这里一次暴露完整的桥接对象，各页面只调用自己需要的部分。
 contextBridge.exposeInMainWorld("piWebBox", {
   // ── 启动页与错误页 ──
-  getStatus: () => ipcRenderer.invoke("pi-web-box:get-status"),
+  getStatus: () => ipcRenderer.invoke("pi-web-box:get-status") as Promise<StatusReport>,
   getStartupProgress: () => ipcRenderer.invoke("pi-web-box:get-startup-progress"),
   onStartupProgress: (callback: (progress: StartupProgress) => void) =>
     subscribe("pi-web-box:startup-progress", callback),
@@ -39,13 +43,21 @@ contextBridge.exposeInMainWorld("piWebBox", {
   resetSettings: (): Promise<SaveSettingsResult> => ipcRenderer.invoke("pi-web-box:reset-settings"),
   restartApp: () => ipcRenderer.invoke("pi-web-box:restart"),
   closeSettings: () => ipcRenderer.invoke("pi-web-box:close-settings"),
-  refreshTitleBar: () => ipcRenderer.invoke("pi-web-box:refresh-titlebar"),
-  onSettingsTheme: (callback: (payload: { palette: ThemePalette; theme: string }) => void) =>
+  onSettingsTheme: (callback: (payload: { palette: ThemePalette; theme: string; isDark: boolean }) => void) =>
     subscribe("pi-web-box:settings-theme", callback),
-  // 用量记录插件的检测与一键安装
-  checkUsageExtension: () => ipcRenderer.invoke("pi-web-box:check-usage-extension"),
-  installUsageExtension: () => ipcRenderer.invoke("pi-web-box:install-usage-extension"),
-  // 在系统浏览器中打开链接（内网地址、仓库等）
+  // 内置插件（用量记录 / 会话命名）的检测与一键安装；只接受内置扩展名。
+  checkExtension: (name: string): Promise<ExtensionInfo | undefined> =>
+    ipcRenderer.invoke("pi-web-box:check-extension", name),
+  installExtension: (name: string): Promise<SaveSettingsResult> =>
+    ipcRenderer.invoke("pi-web-box:install-extension", name),
+  // pi 的本地目录与全局 AGENTS.md：只允许两个固定目标
+  openPiPath: (target: "directory" | "agents"): Promise<{ ok: boolean; message: string }> =>
+    ipcRenderer.invoke("pi-web-box:open-pi-path", target),
+  createAgentsFile: (): Promise<SaveSettingsResult> => ipcRenderer.invoke("pi-web-box:create-agents-file"),
+  // 会话命名配置：写入 pi 的 agent 目录，插件下次命名即刻生效
+  saveSessionName: (config: SessionNameConfig): Promise<SaveSettingsResult> =>
+    ipcRenderer.invoke("pi-web-box:save-session-name", config),
+  // 在系统浏览器中打开链接（内网地址、仓库、Node.js 下载页等）
   openExternal: (url: string) => ipcRenderer.invoke("pi-web-box:open-external", url),
 
   // ── 用量统计窗口 ──
@@ -89,6 +101,9 @@ contextBridge.exposeInMainWorld("piWebBox", {
   reportTheme: (report: ThemeReport) => ipcRenderer.send("pi-web-box:report-theme", report),
   enhancePrompt: (request: EnhanceRequest): Promise<EnhanceResponse> =>
     ipcRenderer.invoke("pi-web-box:enhance-prompt", request),
+  // 「生成标题」：主进程读会话内容、用命名模型生成并写回会话名
+  generateSessionTitle: (): Promise<SessionTitleResult> =>
+    ipcRenderer.invoke("pi-web-box:generate-session-title"),
   // 托盘角标轮询：页面内脚本不直接轮询，统一由主进程负责。
   getRunningState: () => ipcRenderer.invoke("pi-web-box:get-running-state"),
 });

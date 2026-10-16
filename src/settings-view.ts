@@ -1,10 +1,12 @@
-import { isDarkTheme, THEME_PALETTES, type ThemePalette } from "./themes.js";
+import { isDarkPalette, THEME_PALETTES, type ThemePalette } from "./themes.js";
 import { buildTitleBarHtml, TITLE_BAR_CSS, TITLE_BAR_SCRIPT } from "./titlebar-view.js";
 
 export type SettingsViewData = {
-  // 当前 Pi Web 主题，用于让设置窗口跟随 Pi Web 的外观。
+  // 当前 Pi Web 主题标识，用于让设置窗口跟随 Pi Web 的外观。
   theme: string;
   systemDark: boolean;
+  // 主进程合成好的色板（优先页面实测颜色）；缺省时回退到内置色板。
+  palette?: ThemePalette;
   // 品牌图标（深/浅两版），按主题切换，避免深色主题里黑 logo 看不清。
   darkIconDataUrl: string;
   lightIconDataUrl: string;
@@ -77,6 +79,8 @@ const BASE_CSS = `
   .actions .status.err { color: #c0392b; }
   .spacer { flex: 1; }
   code { padding: 2px 5px; border-radius: 4px; background: var(--bg-panel); font-family: Consolas, ui-monospace, monospace; font-size: 12px; }
+  /* 路径类的 code 可能很长，允许在任意位置换行，避免撑破面板。 */
+  .row .hint code { overflow-wrap: anywhere; }
   .preview { display: flex; align-items: center; gap: 10px; padding: 10px 15px; border-bottom: 1px solid var(--border); background: var(--bg-panel); font-size: 12px; color: var(--text-muted); }
   .preview b { color: var(--text); font-weight: 600; }
   .swatches { display: flex; gap: 7px; }
@@ -103,8 +107,9 @@ const BASE_CSS = `
 
 /** 生成设置窗口的完整 HTML，外观直接使用当前 Pi Web 主题的色板。 */
 export function buildSettingsHtml(data: SettingsViewData): string {
-  const palette: ThemePalette = THEME_PALETTES[data.theme] ??
+  const palette: ThemePalette = data.palette ?? THEME_PALETTES[data.theme] ??
     (data.systemDark ? THEME_PALETTES.dark : THEME_PALETTES.light);
+  const dark = isDarkPalette(palette);
 
   const themeVars = `
     --bg: ${palette.background};
@@ -130,12 +135,12 @@ export function buildSettingsHtml(data: SettingsViewData): string {
 <body>
   ${buildTitleBarHtml({
     title: "Pi Web Box 设置",
-    iconDataUrl: isDarkTheme(palette.id) ? data.darkIconDataUrl : data.lightIconDataUrl,
+    iconDataUrl: dark ? data.darkIconDataUrl : data.lightIconDataUrl,
   })}
   <div class="layout">
     <aside class="side">
       <div class="brand">
-        <img id="brandIcon" src="${isDarkTheme(palette.id) ? data.darkIconDataUrl : data.lightIconDataUrl}" alt="" />
+        <img id="brandIcon" src="${dark ? data.darkIconDataUrl : data.lightIconDataUrl}" alt="" />
         <div><b>Pi Web Box</b><span id="themeName">${escapeText(palette.label)}</span></div>
       </div>
       <nav class="nav" id="nav">
@@ -147,6 +152,10 @@ export function buildSettingsHtml(data: SettingsViewData): string {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"></path><rect x="7" y="12" width="3" height="6" rx="1"></rect><rect x="12" y="8" width="3" height="10" rx="1"></rect><rect x="17" y="5" width="3" height="13" rx="1"></rect></svg>
           Token 统计
         </button>
+        <button type="button" data-pane="pi">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path></svg>
+          Pi 配置
+        </button>
         <button type="button" data-pane="piweb">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M3 12h18M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18"></path></svg>
           Pi Web 配置
@@ -154,6 +163,10 @@ export function buildSettingsHtml(data: SettingsViewData): string {
         <button type="button" data-pane="enhance">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"></path></svg>
           提示词增强
+        </button>
+        <button type="button" data-pane="sessionname">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h11l-2.5-2.5M20 17H9l2.5 2.5"></path></svg>
+          会话命名
         </button>
         <button type="button" data-pane="about">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 16v-4M12 8h.01"></path></svg>
@@ -205,13 +218,6 @@ export function buildSettingsHtml(data: SettingsViewData): string {
           </div>
           <div class="row">
             <div>
-              <div class="label">刷新标题栏外观</div>
-              <div class="hint">标题栏一般会自动跟随 Pi Web 主题。若切换主题后标题栏颜色没有更新，可点此手动同步一次。</div>
-            </div>
-            <div class="control"><button class="btn" type="button" id="refreshTitleBar">刷新</button></div>
-          </div>
-          <div class="row">
-            <div>
               <div class="label">重启 Pi Web Box</div>
               <div class="hint">重启会关闭并重新启动应用，同时用新配置重新拉起 Pi Web 服务。</div>
             </div>
@@ -240,6 +246,38 @@ export function buildSettingsHtml(data: SettingsViewData): string {
               <div class="hint">打开独立的统计窗口，查看今日用量、最近一年热力图与各模型占比，支持自定义起止日期与模型筛选。</div>
             </div>
             <div class="control"><button class="btn" type="button" id="openUsage">打开统计</button></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="pane" id="pane-pi" hidden>
+        <h1>Pi 配置</h1>
+        <p class="desc">pi 的本地目录与全局规则文件，点开即可用系统默认程序查看或编辑。</p>
+        <div class="pane-body">
+          <div class="group">
+            <div class="row stack">
+              <div>
+                <div class="label">pi 本地目录</div>
+                <div class="hint">保存 pi 的配置、模型、会话与扩展：<code id="piDirectory">—</code></div>
+              </div>
+              <div class="control"><button class="btn" type="button" id="openPiDir">打开文件夹</button></div>
+            </div>
+            <div class="row stack">
+              <div>
+                <div class="label">全局 AGENTS.md</div>
+                <div class="hint" id="agentsHint">对所有项目生效的规则文件。</div>
+              </div>
+              <div class="control" style="display:flex;gap:8px">
+                <button class="btn" type="button" id="createAgents">新建</button>
+                <button class="btn primary" type="button" id="openAgents">打开文件</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="pane-foot">
+          <div class="actions" style="margin:0">
+            <span class="spacer"></span>
+            <span class="status" id="piStatus"></span>
           </div>
         </div>
       </section>
@@ -342,6 +380,72 @@ export function buildSettingsHtml(data: SettingsViewData): string {
         </div>
       </section>
 
+      <section class="pane" id="pane-sessionname" hidden>
+        <h1>会话命名</h1>
+        <p class="desc">新建会话时自动生成带日期的名称，命名可以用与当前会话不同的模型。</p>
+        <div class="pane-body">
+          <div class="group">
+            <div class="row">
+              <div>
+                <div class="label">启用自动命名</div>
+                <div class="hint">关闭后不再自动命名，手动命令 <code>/session-name rename</code> 与 Pi Web 输入框旁的「生成标题」按钮仍可用。切换后即刻生效，无需重启 pi。</div>
+              </div>
+              <div class="control">
+                <label class="switch" title="启用自动命名">
+                  <input type="checkbox" id="sessionNameEnabled" />
+                  <span class="track"></span><span class="thumb"></span>
+                </label>
+              </div>
+            </div>
+            <div class="row stack">
+              <div>
+                <div class="label">供应商</div>
+                <div class="hint">从 pi 的 <code>models.json</code> 读取，只列出已配置 API Key 的供应商。</div>
+              </div>
+              <div class="control"><select id="sessionNameProvider" style="width:100%"><option value="">未选择</option></select></div>
+            </div>
+            <div class="row stack">
+              <div>
+                <div class="label">命名模型</div>
+                <div class="hint">建议选择响应快、成本低的模型，命名属于短改写任务，不需要强推理能力。</div>
+              </div>
+              <div class="control"><select id="sessionNameModel" style="width:100%"><option value="">请先选择供应商</option></select></div>
+            </div>
+          </div>
+          <div class="group" style="margin-top:14px">
+            <div class="row">
+              <div>
+                <div class="label">会话命名插件</div>
+                <div class="hint" id="sessionNameExtHint">正在检测…</div>
+              </div>
+              <div class="control" style="display:flex;gap:8px">
+                <button class="btn" type="button" id="recheckSessionNameExt">重新检测</button>
+                <button class="btn primary" type="button" id="installSessionNameExt">安装</button>
+              </div>
+            </div>
+            <div class="row stack">
+              <div>
+                <div class="label">配置文件</div>
+                <div class="hint">上面两项保存后写入此文件，插件每次命名前重新读取：<code id="sessionNameConfigPath">—</code></div>
+              </div>
+            </div>
+            <div class="row stack">
+              <div>
+                <div class="label">安装或更新后需要重载</div>
+                <div class="hint">插件是 pi 进程里已经加载的代码：安装或更新后请在 pi 的输入框里发送 <code>/reload</code>（或重启 pi）才会生效；只改上面的开关与模型不需要重载，保存后即刻生效。</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="pane-foot">
+          <div class="actions" style="margin:0">
+            <button class="btn primary" type="button" id="saveSessionName">保存</button>
+            <span class="spacer"></span>
+            <span class="status" id="sessionNameStatus"></span>
+          </div>
+        </div>
+      </section>
+
       <section class="pane" id="pane-about" hidden>
         <h1>关于</h1>
         <p class="desc">Pi Web Box 是 Pi Web 的 Windows 桌面外壳。</p>
@@ -372,7 +476,7 @@ export function buildSettingsHtml(data: SettingsViewData): string {
   window.__PI_WEB_BOX_BOOT__ = ${JSON.stringify({
     theme: palette.id,
     label: palette.label,
-    isDark: isDarkTheme(palette.id),
+    isDark: dark,
     palette: {
       background: palette.background,
       panel: palette.panel,

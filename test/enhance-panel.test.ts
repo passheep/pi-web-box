@@ -13,6 +13,8 @@ function buildScript(): string {
       { id: "coding", label: "编程" },
     ],
     defaultScene: "general",
+    titleConfigured: true,
+    titleModelLabel: "magpie/workbuddy2api/Deepseek-V4.1-Flash",
   });
 }
 
@@ -42,4 +44,22 @@ test("enhance panel keeps the back-to-bottom button hidden until it can scroll",
   // 找不到滚动容器时必须隐藏按钮，避免出现按不动的悬浮球。
   assert.match(script, /if \(!scroller\) \{/);
   assert.match(script, /toBottom\.classList\.remove\("show", "has-new"\)/);
+});
+
+// 「生成标题」按钮紧跟「增强」，点击后调主进程完成命名并浮出结果提示。
+test("enhance panel renders the title button next to the enhance button", () => {
+  const script = buildScript();
+  assert.match(script, /id="title"/);
+  assert.match(script, /生成标题/);
+  assert.match(script, /window\.piWebBox\.generateSessionTitle\(\)/);
+  assert.match(script, /id="toast"/);
+  // 按钮顺序：先增强、后生成标题（同一行相邻）。
+  assert.ok(script.indexOf('id="enhance"') < script.indexOf('id="title"'));
+  // 未配置命名模型时给出可读提示，而不是静默失败。
+  assert.match(script, /尚未在 Box 设置的「会话命名」中选择命名模型/);
+});
+
+test("enhance panel shows the configured naming model in the tooltip data", () => {
+  const script = buildScript();
+  assert.match(script, /magpie\/workbuddy2api\/Deepseek-V4\.1-Flash/);
 });

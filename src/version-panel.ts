@@ -1,5 +1,5 @@
 import type { ComponentVersions } from "./contracts.js";
-import { THEME_PALETTES } from "./themes.js";
+import type { ThemePalette } from "./themes.js";
 
 export type VersionPanelData = ComponentVersions & {
   // 品牌 logo：深色主题用白色版，浅色主题用深色版。
@@ -10,6 +10,10 @@ export type VersionPanelData = ComponentVersions & {
   qq: string;
   // 提示词增强是否已配置模型，未配置时按钮置灰并给出提示。
   enhanceConfigured: boolean;
+  // 当前色板，仅作为页面读不到 CSS 变量时的回退值。
+  palette: ThemePalette;
+  // 当前主题是否为深色，同样只在页面读不到 class 时回退使用。
+  isDark: boolean;
 };
 
 const PANEL_ID = "pi-web-box-version-panel";
@@ -22,12 +26,9 @@ const PANEL_ID = "pi-web-box-version-panel";
  */
 export function buildVersionPanelScript(data: VersionPanelData): string {
   const payload = JSON.stringify(data).replaceAll("<", "\\u003c");
-  // 把五个主题的面板配色一并带过去，避免依赖 prefers-color-scheme 而与实际主题不一致。
-  const palettePayload = JSON.stringify(THEME_PALETTES).replaceAll("<", "\\u003c");
 
   return `(() => {
     const data = ${payload};
-    const palettes = ${palettePayload};
 
     // 复用已有实例：仅更新数据，避免重复注入造成多个悬浮球。
     const existing = document.getElementById("${PANEL_ID}");
@@ -128,6 +129,39 @@ export function buildVersionPanelScript(data: VersionPanelData): string {
       </div>
     \`;
 
+    // 实时读取页面 CSS 变量：pi-web 后续新增主题也不需要改 Box。
+    // 读不到时逐字段回退到主进程给的色板，避免面板出现透明或黑色。
+    const HEX = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
+    const readVar = (name, fallback) => {
+      try {
+        const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+        return HEX.test(value) ? value : fallback;
+      } catch (error) { void error; return fallback; }
+    };
+    const readPalette = () => ({
+      background: readVar("--bg", data.palette.background),
+      panel: readVar("--bg-panel", data.palette.panel),
+      border: readVar("--border", data.palette.border),
+      text: readVar("--text", data.palette.text),
+      textMuted: readVar("--text-muted", data.palette.textMuted),
+      accent: readVar("--accent", data.palette.accent),
+    });
+    // pi-web 对深色主题会同时给 html 打上 dark class，优先用它；
+    // 拿不到 class 时按背景亮度判断，不依赖主题名单。
+    const readIsDark = () => {
+      const root = document.documentElement;
+      if (root.classList.contains("dark")) return true;
+      const theme = root.dataset.theme || "";
+      // 页面还没初始化主题时用主进程的判断兜底。
+      if (!theme) return data.isDark === true;
+      const value = readPalette().background.replace("#", "");
+      const full = value.length === 3 ? value.split("").map((char) => char + char).join("") : value;
+      const channels = [0, 2, 4].map((index) => parseInt(full.slice(index, index + 2), 16));
+      if (!channels.every((channel) => Number.isFinite(channel))) return data.isDark === true;
+      const luminance = 0.299 * channels[0] + 0.587 * channels[1] + 0.114 * channels[2];
+      return luminance <= 150;
+    };
+
     const wrap = shadow.querySelector(".wrap");
     const button = shadow.querySelector(".trigger");
     const logo = shadow.querySelector(".logo");
@@ -135,10 +169,10 @@ export function buildVersionPanelScript(data: VersionPanelData): string {
     const versions = shadow.querySelectorAll(".version");
     let closeTimer;
 
-    // 主题配色映射：深色主题用深底浅字，浅色主题反之。
-    const applyPalette = (theme) => {
-      const palette = palettes[theme] || palettes.light;
-      const isDark = theme === "dark" || theme === "pine";
+    // 主题配色：全部来自页面实测值，不再按主题名查固定表。
+    const applyPalette = () => {
+      const palette = readPalette();
+      const isDark = readIsDark();
       const style = wrap.style;
       style.setProperty("--p-bg", palette.background);
       style.setProperty("--p-panel", palette.panel);
@@ -147,7 +181,7 @@ export function buildVersionPanelScript(data: VersionPanelData): string {
       style.setProperty("--p-muted", palette.textMuted);
       style.setProperty("--p-accent", palette.accent);
       // hover 底色取面板色向文字色靠拢一点，两种主题都适用。
-      style.setProperty("--p-hover", isDark ? palette.panel : palette.panel);
+      style.setProperty("--p-hover", palette.panel);
       // logo 底色与面板一致，跟随主题而不是写死白色，
       // 否则雾青/蔷薇等主题下圆形按钮会与页面脱节。
       style.setProperty("--p-logo-bg", palette.panel);
@@ -163,7 +197,7 @@ export function buildVersionPanelScript(data: VersionPanelData): string {
       versions[3].textContent = next.pi;
       versions[4].textContent = next.piWeb;
       versions[5].textContent = next.piWebBox;
-      applyPalette(document.documentElement.dataset.theme || "light");
+      applyPalette();
     };
     host.__piWebBoxUpdate = update;
     update(data);
@@ -172,7 +206,7 @@ export function buildVersionPanelScript(data: VersionPanelData): string {
       window.clearTimeout(closeTimer);
       panel.classList.toggle("open", open);
       button.setAttribute("aria-expanded", String(open));
-      if (open) applyPalette(document.documentElement.dataset.theme || "light");
+      if (open) applyPalette();
     };
     const scheduleClose = () => {
       window.clearTimeout(closeTimer);
@@ -203,24 +237,17 @@ export function buildVersionPanelScript(data: VersionPanelData): string {
 
     // ── 外观主题监听：同步标题栏，并让面板跟随主题换色 ──
     if (!window.__piWebBoxThemeSync) {
-      const readBackground = () => {
-        const value = getComputedStyle(document.documentElement).getPropertyValue("--bg").trim();
-        return /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(value) ? value : "";
-      };
       // 标题栏取顶栏实际使用的面板底色，页面主体与顶栏才能连成一片。
-      const readToolbarBackground = () => {
-        const value = getComputedStyle(document.documentElement).getPropertyValue("--bg-panel").trim();
-        return /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(value) ? value : "";
-      };
+      const readToolbarBackground = () => readVar("--bg-panel", data.palette.panel);
       const report = () => {
         const root = document.documentElement;
         const theme = root.dataset.theme || "";
-        const isDark = root.classList.contains("dark");
         try {
           window.piWebBox?.reportTheme?.({
             theme,
-            background: readToolbarBackground() || readBackground(),
-            isDark,
+            background: readToolbarBackground(),
+            isDark: root.classList.contains("dark"),
+            palette: readPalette(),
           });
         } catch (error) {
           void error;

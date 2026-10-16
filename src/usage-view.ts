@@ -5,6 +5,8 @@ import { buildTitleBarHtml, TITLE_BAR_CSS, TITLE_BAR_SCRIPT } from "./titlebar-v
 export type UsageViewData = {
   theme: string;
   systemDark: boolean;
+  // 主进程合成好的色板（优先页面实测颜色）；缺省时回退到内置色板。
+  palette?: ThemePalette;
   rendererScript: string;
   // 品牌图标（深浅两版），用于自绘标题栏。
   darkIconDataUrl: string;
@@ -118,7 +120,7 @@ const BASE_CSS = `
 
 /** 生成用量统计窗口的完整 HTML。 */
 export function buildUsageHtml(data: UsageViewData): string {
-  const palette: ThemePalette = THEME_PALETTES[data.theme] ??
+  const palette: ThemePalette = data.palette ?? THEME_PALETTES[data.theme] ??
     (data.systemDark ? THEME_PALETTES.dark : THEME_PALETTES.light);
   const themeVars = `
     --bg: ${palette.background};

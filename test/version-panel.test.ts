@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { buildVersionPanelScript } from "../src/version-panel.js";
+import { THEME_PALETTES } from "../src/themes.js";
 
 test("version panel contains component versions and external links", () => {
   const script = buildVersionPanelScript({
@@ -10,6 +11,8 @@ test("version panel contains component versions and external links", () => {
     piWebBox: "0.4.0",
     darkIconDataUrl: "data:image/png;base64,abc",
     lightIconDataUrl: "data:image/png;base64,abc",
+    palette: THEME_PALETTES.sand,
+    isDark: false,
   });
   assert.match(script, /0\.84\.2/);
   assert.match(script, /0\.8\.9/);
@@ -49,8 +52,29 @@ test("panel scripts clear every stale instance before mounting", () => {
     piWebBox: "3",
     darkIconDataUrl: "data:image/png;base64,abc",
     lightIconDataUrl: "data:image/png;base64,abc",
+    palette: THEME_PALETTES.dusk,
+    isDark: true,
   });
   assert.match(script, /querySelectorAll\("#pi-web-box-version-panel"\)/);
+});
+
+// 主题色改为上报页面实测值，pi-web 新增主题不需要改 Box 就能跟随。
+test("panel reports theme colors read from the live CSS variables", () => {
+  const script = buildVersionPanelScript({
+    pi: "1",
+    piWeb: "2",
+    piWebBox: "3",
+    darkIconDataUrl: "data:image/png;base64,abc",
+    lightIconDataUrl: "data:image/png;base64,abc",
+    palette: THEME_PALETTES.sand,
+    isDark: false,
+  });
+  assert.match(script, /--bg-panel/);
+  assert.match(script, /palette: readPalette\(\)/);
+  assert.match(script, /classList\.contains\("dark"\)/);
+  // 不再按主题名查固定色板（旧实现导致新主题不跟随）。
+  assert.doesNotMatch(script, /palettes\[theme\]/);
+  assert.doesNotThrow(() => new Function(script));
 });
 
 // 月份标签必须按横跨的周数分配宽度，写死 11px 会把最右侧的月份裁成半个字。

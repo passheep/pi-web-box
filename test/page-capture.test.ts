@@ -217,6 +217,8 @@ test("路由同步只本地上报 sessionId，归属 SSE/旧会话，不做网�
   await h.tick();
   assert.deepEqual(h.reports, [{ sessionId: "alpha" }, { sessionId: "beta" }]);
   h.c.history.replaceState(null, "", "/");
+  // 回到新建会话页时 pi-web 会关闭当前会话的事件流，归属随之清空。
+  pushed.close();
   assert.deepEqual(h.reports.at(-1), { sessionId: "" });
   await h.tick();
   assert.deepEqual(h.reports.filter((item) => item.sessionId === "").length, 1);
@@ -316,4 +318,43 @@ test("弹窗提醒上报失败不阻断页面事件", async () => {
   h.c.piWebBox.reportAttention = (payload: any) => { h.attentions.push(JSON.parse(JSON.stringify(payload))); };
   stream.emit({ type: "extension_ui_request", id: "q2", method: "input", title: "请输入" });
   assert.deepEqual(h.attentions.map((item) => item.requestId), ["q2"]);
+});
+
+// pi-web 首屏自动打开上次会话时不会改写 URL，标签归属只能由事件流补上。
+test("URL 没有 session 参数时用当前会话的事件流上报标签归属", () => {
+  const h = harness("http://127.0.0.1:30141/");
+  h.install();
+  assert.deepEqual(h.reports, [{ sessionId: "" }]);
+  const alpha = new h.c.EventSource("/api/agent/alpha/events");
+  assert.deepEqual(h.reports.at(-1), { sessionId: "alpha" });
+  // 同一个会话重连（维护器重建连接）不重复上报。
+  new h.c.EventSource("/api/agent/alpha/events");
+  assert.equal(h.reports.length, 2);
+  // 切换会话：新流上报新会话。
+  const beta = new h.c.EventSource("/api/agent/beta/events");
+  assert.deepEqual(h.reports.at(-1), { sessionId: "beta" });
+  // 回到新建会话页（当前流关闭）：撤销归属。
+  beta.close();
+  assert.deepEqual(h.reports.at(-1), { sessionId: "" });
+  // 旧流关闭不影响当前归属。
+  alpha.close();
+  assert.deepEqual(h.reports.at(-1), { sessionId: "" });
+  assert.equal(h.reports.length, 4);
+});
+
+test("URL 的 session 参数优先于事件流，切会话后两者一致", () => {
+  const h = harness("http://127.0.0.1:30141/?session=alpha");
+  h.install();
+  assert.deepEqual(h.reports, [{ sessionId: "alpha" }]);
+  // 事件流指向别的会话时不覆盖 URL（URL 是显式跳转意图）。
+  new h.c.EventSource("/api/agent/beta/events");
+  assert.deepEqual(h.reports, [{ sessionId: "alpha" }]);
+  // 用户在页面内切到 beta：URL 与事件流都指向 beta，只上报一次。
+  h.c.history.replaceState(null, "", "?session=beta");
+  new h.c.EventSource("/api/agent/beta/events");
+  assert.deepEqual(h.reports, [{ sessionId: "alpha" }, { sessionId: "beta" }]);
+  // 关闭事件流后 URL 仍然有效，归属保持不变。
+  const stream = new h.c.EventSource("/api/agent/beta/events");
+  stream.close();
+  assert.deepEqual(h.reports.at(-1), { sessionId: "beta" });
 });

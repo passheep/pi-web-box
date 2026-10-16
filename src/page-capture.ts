@@ -4,6 +4,8 @@
  * 只旁听页面自己建立的 SSE；不建连接、不补历史、不拦截/修改原消息。
  * 页面内不再 fetch 会话详情（HTTP/1.1 下 SSE 已占满 6 个连接，详情请求会被阻塞）；
  * 会话名由主进程集中读取，页面只上报 sessionId，sessionName 始终留空由主进程补齐。
+ * 标签归属：优先 URL 的 ?session=；首屏自动打开上次会话时 pi-web 不改 URL，
+ * 此时用「当前 agent 事件流」的会话 id，否则顶部标签会一直停在“新标签页”。
  */
 export function installPageCapture(): void {
   const w = globalThis as any;
@@ -15,6 +17,10 @@ export function installPageCapture(): void {
   const origin = w.location.origin;
   let sessionId = "";
   let initialized = false;
+  // 当前标签页显示的会话：优先取 URL 的 session 参数（显式跳转意图），
+  // 其次取 pi-web 为「当前会话」建立的事件流地址。
+  // 首屏自动打开上次会话时 pi-web 不会改写 URL，只能靠事件流识别。
+  let streamSession = "";
   // 仅供 SSE -> DOM 当次配对，限时、限量、消费一次；不是永久文本去重。
   let recent: any[] = [];
   const seenNodes = new WeakMap<any, string>();
@@ -65,7 +71,7 @@ export function installPageCapture(): void {
   // 只做本地路由同步，不发起任何网络请求。
   const syncRoute = (): void => {
     try {
-      const next = readSession();
+      const next = readSession() || streamSession;
       if (initialized && next === sessionId) return;
       initialized = true;
       clearWaiting();
@@ -88,6 +94,21 @@ export function installPageCapture(): void {
             const match = /^\/api\/agent\/([^/]+)\/events$/.exec(url.pathname);
             if (url.origin !== origin || !match) return source;
             const id = decodeURIComponent(match[1]);
+            // 同一个页面只维护一条 agent 事件流（切换会话会关闭旧的、打开新的），
+            // 因此它可以代表「当前显示的会话」，补上首屏自动打开时 URL 缺失的信息。
+            streamSession = id;
+            syncRoute();
+            // 回到新建会话页 / 切换会话时流会被关闭，这时撤销标签归属。
+            try {
+              const nativeClose = source.close.bind(source);
+              source.close = () => {
+                if (streamSession === id) {
+                  streamSession = "";
+                  syncRoute();
+                }
+                return nativeClose();
+              };
+            } catch { /* 不能改写 close 时仍以 URL 为准 */ }
             source.addEventListener("message", (event: any) => {
               try {
                 if (typeof event.data !== "string") return;

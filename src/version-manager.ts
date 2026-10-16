@@ -30,6 +30,47 @@ export type VersionProgress = {
   total: number;
 };
 
+/** 缺失的内置命令组件（pi / pi-web），供一键安装使用。 */
+export type MissingPackage = {
+  displayName: string;
+  packageName: string;
+  commandName: string;
+};
+
+/** 启动前环境自检的结果。 */
+export type EnvironmentCheck = {
+  npmAvailable: boolean;
+  nodePath: string;
+  npmPath: string;
+  installed: InstalledVersionInfo[];
+  missing: MissingPackage[];
+};
+
+/** PATH 上能否找到可用的 npm（npm.cmd + npm-cli.js，两者缺一不可）。 */
+export type RuntimeAvailability = {
+  nodePath: string;
+  npmPath: string;
+  npmCliPath: string;
+  npmAvailable: boolean;
+};
+
+/**
+ * 检测 Node.js 与 npm 是否可用。
+ * 只扫描 PATH 与文件是否存在，不创建子进程，因此可以安全地在启动阶段同步调用。
+ */
+export function checkRuntimeEnvironment(
+  env: Record<string, string | undefined> = process.env,
+): RuntimeAvailability {
+  const nodePath = findExecutableOnPath(["node.exe", "node"], env) ?? "";
+  const npmPath = findExecutableOnPath(["npm.cmd", "npm"], env) ?? "";
+  // npm.cmd 是批处理包装，真正的入口在它旁边的 node_modules/npm/bin/npm-cli.js。
+  const npmCliPath = npmPath
+    ? path.join(path.dirname(npmPath), "node_modules", "npm", "bin", "npm-cli.js")
+    : "";
+  const npmAvailable = Boolean(nodePath && npmCliPath && fs.existsSync(npmCliPath));
+  return { nodePath, npmPath, npmCliPath, npmAvailable };
+}
+
 const PACKAGES = [
   { displayName: "Pi", packageName: "@earendil-works/pi-coding-agent", commandName: "pi" },
   { displayName: "Pi Web", packageName: "@agegr/pi-web", commandName: "pi-web" },
@@ -112,11 +153,11 @@ async function findExecutable(fileName: string): Promise<string> {
 }
 
 async function findNpmCli(): Promise<{ node: string; cli: string }> {
-  const node = await findExecutable("node.exe");
-  const npmCommand = await findExecutable("npm.cmd");
-  const cli = path.join(path.dirname(npmCommand), "node_modules", "npm", "bin", "npm-cli.js");
-  if (!fs.existsSync(cli)) throw new Error(`找不到 npm-cli.js：${cli}`);
-  return { node, cli };
+  const runtime = checkRuntimeEnvironment();
+  if (!runtime.nodePath) throw new Error("找不到 node.exe，无法自动安装。");
+  if (!runtime.npmPath) throw new Error("找不到 npm.cmd，无法自动安装。");
+  if (!runtime.npmAvailable) throw new Error(`找不到 npm-cli.js：${runtime.npmCliPath}`);
+  return { node: runtime.nodePath, cli: runtime.npmCliPath };
 }
 
 function emitOutput(text: string, onOutput: (message: string) => void): void {
@@ -139,6 +180,74 @@ function waitForProcess(child: ChildProcess, onOutput: (message: string) => void
 
 export class VersionManager {
   constructor(private readonly log: (message: string) => void) {}
+
+  /**
+   * 启动前环境自检：Node.js/npm 是否可用 + pi / pi-web 是否已安装。
+   * 已安装清单同时返回，调用方可以直接用它填充界面上的版本信息。
+   */
+  async checkEnvironment(onProgress?: (progress: VersionProgress) => void): Promise<EnvironmentCheck> {
+    const runtime = checkRuntimeEnvironment();
+    const installed = await this.getInstalledVersions(onProgress);
+    const missing = PACKAGES
+      .filter((item) => !installed.some((entry) => entry.commandName === item.commandName))
+      .map((item) => ({
+        displayName: item.displayName,
+        packageName: item.packageName,
+        commandName: item.commandName,
+      }));
+    return {
+      npmAvailable: runtime.npmAvailable,
+      nodePath: runtime.nodePath,
+      npmPath: runtime.npmPath,
+      installed,
+      missing,
+    };
+  }
+
+  /**
+   * 安装缺失的组件：统一用 npm 全局安装最新版（行家的 pi 用 pnpm 安装时也不影响，
+   * 只是多一个全局副本），输出与进度走与自动更新相同的一条通道。
+   */
+  async install(
+    packages: MissingPackage[],
+    onProgress?: (progress: VersionProgress) => void,
+  ): Promise<void> {
+    const registry = getRegistry();
+    for (let index = 0; index < packages.length; index += 1) {
+      const item = packages[index];
+      const baseProgress = {
+        displayName: item.displayName,
+        completed: index,
+        total: packages.length,
+      };
+      onProgress?.({ ...baseProgress, stage: "installing", message: `正在安装 ${item.displayName}…` });
+      this.log(`Installing ${item.packageName}@latest with npm via ${registry}.`);
+
+      const onOutput = (message: string) => {
+        this.log(`${item.displayName} install: ${message}`);
+        onProgress?.({ ...baseProgress, stage: "output", message });
+      };
+      const npm = await findNpmCli();
+      const child = spawn(npm.node, [
+        npm.cli, "install", "--global", `${item.packageName}@latest`, "--registry", registry,
+        "--progress=true", "--loglevel=notice",
+      ], {
+        windowsHide: true,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, FORCE_COLOR: "0", npm_config_progress: "true" },
+      });
+      await waitForProcess(child, onOutput);
+
+      this.log(`${item.displayName} install completed.`);
+      onProgress?.({
+        stage: "completed",
+        displayName: item.displayName,
+        message: `${item.displayName} 安装完成`,
+        completed: index + 1,
+        total: packages.length,
+      });
+    }
+  }
 
   async getInstalledVersions(onProgress?: (progress: VersionProgress) => void): Promise<InstalledVersionInfo[]> {
     const installed: InstalledVersionInfo[] = [];

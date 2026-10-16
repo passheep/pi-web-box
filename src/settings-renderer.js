@@ -22,9 +22,24 @@ const commandLine = document.getElementById("commandLine");
 const themeName = document.getElementById("themeName");
 const lanRow = document.getElementById("lanRow");
 const lanAddress = document.getElementById("lanAddress");
-const extHint = document.getElementById("extHint");
+const usageExtension = document.getElementById("extHint");
 const installExt = document.getElementById("installExt");
 const enhanceStatus = document.getElementById("enhanceStatus");
+const piDirectory = document.getElementById("piDirectory");
+const agentsHint = document.getElementById("agentsHint");
+const openPiDir = document.getElementById("openPiDir");
+const openAgents = document.getElementById("openAgents");
+const createAgents = document.getElementById("createAgents");
+const piStatus = document.getElementById("piStatus");
+const sessionNameEnabled = document.getElementById("sessionNameEnabled");
+const sessionNameProvider = document.getElementById("sessionNameProvider");
+const sessionNameModel = document.getElementById("sessionNameModel");
+const sessionNameStatus = document.getElementById("sessionNameStatus");
+const saveSessionNameButton = document.getElementById("saveSessionName");
+const sessionNameExtHint = document.getElementById("sessionNameExtHint");
+const sessionNameConfigPath = document.getElementById("sessionNameConfigPath");
+const recheckSessionNameExt = document.getElementById("recheckSessionNameExt");
+const installSessionNameExt = document.getElementById("installSessionNameExt");
 const aboutVersion = document.getElementById("aboutVersion");
 const aboutQq = document.getElementById("aboutQq");
 const aboutRuntime = document.getElementById("aboutRuntime");
@@ -199,6 +214,8 @@ document.getElementById("saveEnhance").addEventListener("click", async () => {
   if (result.snapshot) {
     snapshot = result.snapshot;
     renderProviders(result.snapshot);
+    // 供应商列表变化后同步刷新会话命名的模型下拉。
+    renderSessionName(result.snapshot.sessionName);
   }
   // 增强模型属于立即生效的配置，不涉及重启。
   setStatus(enhanceStatus, "已保存，即刻生效", "ok");
@@ -253,41 +270,194 @@ document.getElementById("openLan").addEventListener("click", () => {
   if (currentLanAddress) void api.openExternal(currentLanAddress);
 });
 
-// ── 用量记录插件 ──
-function renderExtension(info) {
+/** 把「说明 + 等宽路径」写进提示区；用 DOM 拼接避免路径里的特殊字符被当成 HTML。 */
+function setPathHint(element, text, filePath) {
+  element.textContent = text;
+  const code = document.createElement("code");
+  code.textContent = filePath;
+  element.appendChild(code);
+}
+
+// ── Pi 配置 ──
+function renderPi(info) {
+  if (!info) return;
+  piDirectory.textContent = info.directoryExists ? info.directory : `${info.directory}（目录不存在）`;
+  if (info.agentsExists) {
+    setPathHint(agentsHint, "对所有项目生效的规则文件：", info.agentsFile);
+  } else {
+    setPathHint(agentsHint, "尚未创建，可点「新建」写入空白模板：", info.agentsFile);
+  }
+  // 已存在时不需要再提供新建入口。
+  createAgents.hidden = info.agentsExists;
+  openAgents.disabled = !info.agentsExists;
+}
+
+openPiDir.addEventListener("click", async () => {
+  const result = await api.openPiPath("directory");
+  setStatus(piStatus, result?.ok ? "已打开 pi 目录" : (result?.message || "打开失败"), result?.ok ? "ok" : "err");
+});
+
+openAgents.addEventListener("click", async () => {
+  const result = await api.openPiPath("agents");
+  setStatus(piStatus, result?.ok ? (result.message || "已打开 AGENTS.md") : (result?.message || "打开失败"), result?.ok ? "ok" : "err");
+});
+
+createAgents.addEventListener("click", async () => {
+  createAgents.disabled = true;
+  const result = await api.createAgentsFile();
+  createAgents.disabled = false;
+  if (result?.snapshot) {
+    snapshot = result.snapshot;
+    renderPi(result.snapshot.pi);
+  }
+  setStatus(piStatus, result?.message || (result?.ok ? "已创建" : "创建失败"), result?.ok ? "ok" : "err");
+});
+
+
+document.getElementById("openUsage").addEventListener("click", () => void api.openUsage());
+
+// ── 内置插件（用量记录 / 会话命名）的检测与安装 ──
+function renderExtension(info, hint, button) {
   if (!info) return;
   if (info.installed && info.upToDate) {
-    extHint.innerHTML = `已安装且为当前版本：<code>${info.installPath}</code>`;
-    installExt.textContent = "已安装";
-    installExt.disabled = true;
+    hint.innerHTML = `已安装且为当前版本：<code>${info.installPath}</code>`;
+    button.textContent = "已安装";
+    button.disabled = true;
   } else if (info.installed) {
-    extHint.innerHTML = `已安装，但版本与内置版本不同，可点「安装」更新：<code>${info.installPath}</code>`;
-    installExt.textContent = "更新";
-    installExt.disabled = false;
+    hint.innerHTML = `已安装，但版本与内置版本不同，可点「安装」更新：<code>${info.installPath}</code>`;
+    button.textContent = "更新";
+    button.disabled = false;
   } else if (!info.sourceAvailable) {
-    extHint.textContent = "安装包内未找到内置插件，无法自动安装。";
-    installExt.disabled = true;
+    hint.textContent = "安装包内未找到内置插件，无法自动安装。";
+    button.disabled = true;
   } else {
-    extHint.innerHTML = `尚未安装。安装位置：<code>${info.installPath}</code>`;
-    installExt.textContent = "安装";
-    installExt.disabled = false;
+    hint.innerHTML = `尚未安装。安装位置：<code>${info.installPath}</code>`;
+    button.textContent = "安装";
+    button.disabled = false;
+  }
+}
+
+/** 安装或更新内置插件，并用返回值刷新状态。 */
+async function installExtension(name, hint, button, render) {
+  button.disabled = true;
+  hint.textContent = "正在安装…";
+  const result = await api.installExtension(name);
+  hint.textContent = result.message;
+  if (result.snapshot) {
+    snapshot = result.snapshot;
+    render(result.snapshot);
+  } else {
+    renderExtension(await api.checkExtension(name), hint, button);
   }
 }
 
 document.getElementById("recheckExt").addEventListener("click", async () => {
-  extHint.textContent = "正在检测…";
-  renderExtension(await api.checkUsageExtension());
+  usageExtension.textContent = "正在检测…";
+  renderExtension(await api.checkExtension("pi-usage-log"), usageExtension, installExt);
 });
 
 installExt.addEventListener("click", async () => {
-  installExt.disabled = true;
-  extHint.textContent = "正在安装…";
-  const result = await api.installUsageExtension();
-  extHint.textContent = result.message;
-  renderExtension(await api.checkUsageExtension());
+  await installExtension("pi-usage-log", usageExtension, installExt, (next) => {
+    renderExtension(next.usageExtension, usageExtension, installExt);
+  });
 });
 
-document.getElementById("openUsage").addEventListener("click", () => void api.openUsage());
+// ── 会话命名 ──
+function renderSessionName(state) {
+  if (!state) return;
+  sessionNameEnabled.checked = !!state.config.enabled;
+  sessionNameConfigPath.textContent = state.configPath;
+
+  const withKey = providers.filter((provider) => provider.hasApiKey);
+  sessionNameProvider.innerHTML = '<option value="">未选择</option>';
+  for (const provider of withKey) {
+    const option = document.createElement("option");
+    option.value = provider.id;
+    option.textContent = `${provider.name}（${provider.id}）`;
+    sessionNameProvider.appendChild(option);
+  }
+  // 配置里的供应商可能已不在 models.json 中：补一条，避免静默丢掉用户原值。
+  if (state.config.provider && !withKey.some((provider) => provider.id === state.config.provider)) {
+    const option = document.createElement("option");
+    option.value = state.config.provider;
+    option.textContent = `${state.config.provider}（当前配置，models.json 中不存在）`;
+    sessionNameProvider.appendChild(option);
+  }
+  sessionNameProvider.value = state.config.provider || "";
+  renderSessionNameModels(state.config);
+  renderExtension(state.extension, sessionNameExtHint, installSessionNameExt);
+}
+
+/** 模型下拉只列当前供应商的模型；供应商已失效时保留配置值供查看。 */
+function renderSessionNameModels(config) {
+  const provider = providers.find((item) => item.id === sessionNameProvider.value);
+  sessionNameModel.innerHTML = "";
+  const add = (value, label) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    sessionNameModel.appendChild(option);
+  };
+  if (!provider) {
+    if (config?.provider && config.provider === sessionNameProvider.value && config.model) {
+      add(config.model, `${config.model}（当前配置，models.json 中不存在）`);
+      sessionNameModel.disabled = false;
+      return;
+    }
+    add("", "请先选择供应商");
+    sessionNameModel.disabled = true;
+    return;
+  }
+  sessionNameModel.disabled = false;
+  add("", "未选择");
+  for (const model of provider.models) {
+    add(model.id, model.name && model.name !== model.id ? `${model.name}（${model.id}）` : model.id);
+  }
+  if (config?.model && provider.models.some((model) => model.id === config.model)) {
+    sessionNameModel.value = config.model;
+  }
+}
+
+sessionNameProvider.addEventListener("change", () => renderSessionNameModels(null));
+
+async function saveSessionName(message) {
+  const result = await api.saveSessionName({
+    enabled: sessionNameEnabled.checked,
+    provider: sessionNameProvider.value,
+    model: sessionNameModel.value,
+  });
+  if (!result.ok) {
+    setStatus(sessionNameStatus, result.message, "err");
+    return false;
+  }
+  if (result.snapshot) {
+    snapshot = result.snapshot;
+    renderSessionName(result.snapshot.sessionName);
+  }
+  setStatus(sessionNameStatus, message || "已保存，即刻生效", "ok");
+  return true;
+}
+
+// 开关与其它开关一致：改动立即写入并生效。
+sessionNameEnabled.addEventListener("change", async () => {
+  const enabled = sessionNameEnabled.checked;
+  const saved = await saveSessionName(enabled ? "已开启：新建会话时自动命名" : "已关闭：不再自动命名");
+  // 保存失败（例如开着开关却没选模型）时把开关拨回去，避免界面与配置不一致。
+  if (!saved) sessionNameEnabled.checked = !!snapshot?.sessionName?.config?.enabled;
+});
+
+saveSessionNameButton.addEventListener("click", () => void saveSessionName());
+
+recheckSessionNameExt.addEventListener("click", async () => {
+  sessionNameExtHint.textContent = "正在检测…";
+  renderExtension(await api.checkExtension("pi-session-name"), sessionNameExtHint, installSessionNameExt);
+});
+
+installSessionNameExt.addEventListener("click", async () => {
+  await installExtension("pi-session-name", sessionNameExtHint, installSessionNameExt, (next) => {
+    renderExtension(next.sessionName.extension, sessionNameExtHint, installSessionNameExt);
+  });
+});
 
 // ── 关于 ──
 function renderAbout(about) {
@@ -306,11 +476,6 @@ document.getElementById("showDataFile").addEventListener("click", () => {
 });
 
 // ── 其它按钮 ──
-document.getElementById("refreshTitleBar").addEventListener("click", async () => {
-  await api.refreshTitleBar();
-  setStatus(statusEl, "已重新同步标题栏外观", "ok");
-});
-
 document.getElementById("restart").addEventListener("click", () => {
   if (!window.confirm("确定要重启 Pi Web Box 吗？\n\n当前的 Pi Web 服务会重新启动，正在进行的操作可能中断。")) return;
   setStatus(statusEl, "正在重启…");
@@ -358,8 +523,8 @@ function setThemeName(text) {
   if (themeName) themeName.textContent = text;
 }
 
-api.onSettingsTheme(({ palette }) => {
-  applyPalette(palette, palette.id === "dark" || palette.id === "pine");
+api.onSettingsTheme(({ palette, isDark }) => {
+  applyPalette(palette, palette.id === "dark" || palette.id === "pine" || !!isDark);
   setThemeName(palette.label);
 });
 
@@ -378,7 +543,9 @@ api.getSettings().then((data) => {
     ["供应商", () => renderProviders(data)],
     ["局域网地址", () => renderLan(data)],
     ["关于", () => renderAbout(data.about)],
-    ["用量插件", () => renderExtension(data.usageExtension)],
+    ["用量插件", () => renderExtension(data.usageExtension, usageExtension, installExt)],
+    ["Pi 配置", () => renderPi(data.pi)],
+    ["会话命名", () => renderSessionName(data.sessionName)],
   ];
   for (const [label, run] of steps) {
     try {

@@ -5,8 +5,11 @@ import type {
   ExtensionInfo,
   RunningState,
   SaveSettingsResult,
+  SessionNameConfig,
+  SessionTitleResult,
   SettingsSnapshot,
   StartupProgress,
+  StatusReport,
   ThemeReport,
   UsageQuery,
 } from "./contracts.js";
@@ -21,7 +24,7 @@ declare global {
   interface Window {
     piWebBox: {
       // ── 启动页与错误页 ──
-      getStatus: () => Promise<{ message: string; details: string; logPath: string }>;
+      getStatus: () => Promise<StatusReport>;
       getStartupProgress: () => Promise<StartupProgress>;
       onStartupProgress: (callback: (progress: StartupProgress) => void) => () => void;
       retryStartup: () => Promise<void>;
@@ -35,10 +38,15 @@ declare global {
       resetSettings: () => Promise<SaveSettingsResult>;
       restartApp: () => Promise<void>;
       closeSettings: () => Promise<void>;
-      refreshTitleBar: () => Promise<void>;
-      onSettingsTheme: (callback: (payload: { palette: ThemePalette; theme: string }) => void) => () => void;
-      checkUsageExtension: () => Promise<ExtensionInfo>;
-      installUsageExtension: () => Promise<SaveSettingsResult>;
+      onSettingsTheme: (callback: (payload: { palette: ThemePalette; theme: string; isDark: boolean }) => void) => () => void;
+      // 内置插件（用量记录 / 会话命名）的检测与一键安装
+      checkExtension: (name: string) => Promise<ExtensionInfo | undefined>;
+      installExtension: (name: string) => Promise<SaveSettingsResult>;
+      // pi 的本地目录与全局 AGENTS.md
+      openPiPath: (target: "directory" | "agents") => Promise<{ ok: boolean; message: string }>;
+      createAgentsFile: () => Promise<SaveSettingsResult>;
+      // 会话命名配置：保存后插件下次命名即刻生效
+      saveSessionName: (config: SessionNameConfig) => Promise<SaveSettingsResult>;
       openExternal: (url: string) => Promise<void>;
 
       // ── 用量统计窗口 ──
@@ -71,6 +79,8 @@ declare global {
       openUsage: () => Promise<void>;
       reportTheme: (report: ThemeReport) => void;
       enhancePrompt: (request: EnhanceRequest) => Promise<EnhanceResponse>;
+      // 「生成标题」：读当前会话内容、用命名模型生成标题并写回会话名。
+      generateSessionTitle: () => Promise<SessionTitleResult>;
       getRunningState: () => Promise<RunningState>;
 
       // 设置窗口的启动数据（由主进程内联写入页面）。

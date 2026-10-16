@@ -7,6 +7,9 @@ export type EnhancePanelData = {
   configured: boolean;
   scenes: Array<{ id: string; label: string }>;
   defaultScene: string;
+  // 「生成标题」使用会话命名配置里的模型；未配置时给出提示。
+  titleConfigured: boolean;
+  titleModelLabel: string;
 };
 
 const PANEL_ID = "pi-web-box-enhance";
@@ -20,6 +23,8 @@ const PANEL_ID = "pi-web-box-enhance";
 export function buildEnhancePanelScript(data: EnhancePanelData): string {
   const payload = JSON.stringify({
     configured: data.configured,
+    titleConfigured: data.titleConfigured,
+    titleModelLabel: data.titleModelLabel,
     scenes: data.scenes,
     defaultScene: data.defaultScene,
     accent: data.palette.accent,
@@ -67,6 +72,10 @@ export function buildEnhancePanelScript(data: EnhancePanelData): string {
         button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
         button:disabled { opacity: .5; cursor: not-allowed; }
         button svg { width: 14px; height: 14px; flex: none; }
+        /* 生成标题的结果提示：紧挨按钮浮出，不挤动工具栏 */
+        .toast { position: fixed; right: 26px; bottom: 118px; z-index: 2147483646; max-width: 340px; padding: 7px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font-size: 12px; line-height: 1.5; box-shadow: 0 6px 20px rgba(0,0,0,.18); opacity: 0; visibility: hidden; transform: translateY(6px); transition: opacity 160ms ease, transform 160ms ease, visibility 0s linear 160ms; }
+        .toast.show { opacity: 1; visibility: visible; transform: translateY(0); transition-delay: 0s; }
+        .toast.error { border-color: #c0392b; color: #c0392b; }
         select { height: 32px; padding: 0 6px; border: 0; border-radius: 9px; background: transparent; color: var(--muted); font: inherit; font-size: 12px; cursor: pointer; transition: background .12s ease, color .12s ease; }
         select:hover { background: var(--hover); color: var(--text); }
         select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
@@ -105,6 +114,11 @@ export function buildEnhancePanelScript(data: EnhancePanelData): string {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M18.4 5.6l-2.8 2.8M8.4 15.6l-2.8 2.8"></path></svg>
           <span>增强</span>
         </button>
+        <button id="title" type="button" title="用命名模型重新生成当前会话标题">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h11M4 18h7"></path></svg>
+          <span>生成标题</span>
+        </button>
+        <span class="toast" id="toast" role="status" aria-live="polite"></span>
         <button class="to-bottom" id="toBottom" type="button" title="回到底部" aria-label="回到底部">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M19 12l-7 7-7-7"></path></svg>
           <span class="badge" id="badge"></span>
@@ -133,6 +147,8 @@ export function buildEnhancePanelScript(data: EnhancePanelData): string {
   const root = shadow;
   const sceneSelect = root.getElementById("scene");
   const enhanceButton = root.getElementById("enhance");
+  const titleButton = root.getElementById("title");
+  const toast = root.getElementById("toast");
   const toBottom = root.getElementById("toBottom");
   const badge = root.getElementById("badge");
   const dialog = root.getElementById("dialog");
@@ -327,6 +343,7 @@ export function buildEnhancePanelScript(data: EnhancePanelData): string {
     themeObserver.disconnect();
     clearInterval(pollTimer);
     clearInterval(fastTimer);
+    window.clearTimeout(toastTimer);
     if (scroller) scroller.removeEventListener("scroll", updateToBottom);
   };
 
@@ -410,6 +427,39 @@ export function buildEnhancePanelScript(data: EnhancePanelData): string {
   // 未配置增强模型时给出明确提示，而不是静默失败。
   if (!data.configured) {
     enhanceButton.title = "尚未在 Box 设置中选择用于增强的模型";
+  }
+
+  // ── 生成标题：调用主进程读会话内容 → 生成 → 写回会话名 ──
+  let toastTimer = 0;
+  const showToast = (text, isError) => {
+    toast.textContent = text;
+    toast.classList.toggle("error", !!isError);
+    toast.classList.add("show");
+    window.clearTimeout(toastTimer);
+    // 失败信息留得更久一点，方便看清原因。
+    toastTimer = window.setTimeout(() => toast.classList.remove("show"), isError ? 8000 : 4000);
+  };
+  let titleBusy = false;
+  titleButton.addEventListener("click", async () => {
+    if (titleBusy) return;
+    titleBusy = true;
+    titleButton.disabled = true;
+    showToast("正在生成会话标题…", false);
+    let response;
+    try {
+      response = await window.piWebBox.generateSessionTitle();
+    } catch (error) {
+      response = { ok: false, message: String(error) };
+    }
+    titleBusy = false;
+    titleButton.disabled = false;
+    if (response && response.ok) showToast("标题已更新：" + response.name, false);
+    else showToast((response && response.message) || "生成标题失败", true);
+  });
+  if (data.titleConfigured) {
+    titleButton.title = "用命名模型重新生成当前会话标题（" + data.titleModelLabel + "）";
+  } else {
+    titleButton.title = "尚未在 Box 设置的「会话命名」中选择命名模型";
   }
 
   // ── 插入到模型按钮所在行的末尾 ──

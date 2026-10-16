@@ -34,11 +34,15 @@
     <source srcset="../assets/pi-logo-on-dark.svg" media="(prefers-color-scheme: dark)" />
     <img class="logo" src="../assets/pi-logo-on-light.svg" alt="Pi" />
   </picture>
-  <h1>Pi Web 启动失败</h1>
+  <h1 id="title">Pi Web 启动失败</h1>
   <p id="message">正在读取错误信息…</p>
   <pre id="details"></pre>
-  <p class="hint">请确认 Node.js ≥ 22.19.0，并已执行 <code>npm install -g @agegr/pi-web@latest</code>。</p>
-  <div class="actions"><button id="retry">重试</button><button class="secondary" id="log">打开日志</button></div>
+  <p class="hint" id="hint">请确认 Node.js ≥ 22.19.0，并已执行 <code>npm install -g @agegr/pi-web@latest</code>。</p>
+  <div class="actions">
+    <button id="retry">重试</button>
+    <button class="secondary" id="download" hidden>下载 Node.js</button>
+    <button class="secondary" id="log">打开日志</button>
+  </div>
 </section></main>
 <script src="./error-renderer.js"></script>
 </body>

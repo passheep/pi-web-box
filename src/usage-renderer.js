@@ -291,7 +291,7 @@ window.addEventListener("load", () => setTimeout(fitWindowToContent, 50));
 setTimeout(fitWindowToContent, 200);
 
 // 主题变化时同步窗口配色。
-api.onSettingsTheme(({ palette }) => {
+api.onSettingsTheme(({ palette, isDark }) => {
   const root = document.documentElement;
   root.style.setProperty("--bg", palette.background);
   root.style.setProperty("--bg-panel", palette.panel);
@@ -302,6 +302,6 @@ api.onSettingsTheme(({ palette }) => {
   // 标题栏底色与主窗口一致，取工具栏区域的面板色。
   root.style.setProperty("--titlebar-bg", palette.panel);
   root.dataset.theme = palette.id;
-  // 自绘标题栏的图标也要跟着主题切。
-  window.__piWebBoxSetTitleBarIcon?.(palette.id === "dark" || palette.id === "pine");
+  // 自绘标题栏的图标也要跟着主题切；深浅由主进程给出，不再依赖主题名。
+  window.__piWebBoxSetTitleBarIcon?.(palette.id === "dark" || palette.id === "pine" || !!isDark);
 });

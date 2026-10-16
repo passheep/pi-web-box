@@ -7,18 +7,24 @@ import type {
   ComponentVersions,
   EnhanceRequest,
   EnhanceResponse,
+  ExtensionInfo,
+  PiPaths,
   ProviderOption,
   RunningState,
   SaveSettingsResult,
+  SessionNameConfig,
+  SessionNameState,
+  SessionTitleResult,
   SettingsSnapshot,
   StartupProgress,
+  StatusReport,
   ThemeReport,
   UsageQuery,
 } from "./contracts.js";
 import { PiWebProcessManager } from "./pi-web-process.js";
 import { isLoopbackHostname, SettingsStore, type BoxSettings } from "./config.js";
 import { ShortcutManager, type IconTheme } from "./shortcut.js";
-import { getPalette, isKnownTheme } from "./themes.js";
+import { getThemeLabel, normalizePalette, resolvePalette, type LivePalette, type ThemePalette } from "./themes.js";
 import { DesktopTabs, isServiceUrl } from "./desktop-tabs.js";
 import { NoticeStore } from "./notice-store.js";
 import { fetchSessionStatus, closeSessionStatusAgents } from "./session-status.js";
@@ -26,7 +32,9 @@ import { AttentionController, type AttentionNotice } from "./attention.js";
 import type { AttentionReport, NoticeInput, NoticeQuery } from "./desktop-contracts.js";
 import {
   VersionManager,
+  type EnvironmentCheck,
   type InstalledVersionInfo,
+  type MissingPackage,
   type PackageVersionInfo,
   type VersionProgress,
 } from "./version-manager.js";
@@ -35,7 +43,20 @@ import { buildSettingsHtml } from "./settings-view.js";
 import { buildUsageHtml, usageWindowWidth } from "./usage-view.js";
 import { buildEnhancePanelScript } from "./enhance-panel.js";
 import { buildUsageOverview, readUsageRecords, toLocalDate, usageLogPath } from "./usage.js";
-import { checkUsageLogExtension, installUsageLogExtension, piAgentDirectory } from "./extensions.js";
+import {
+  BUILTIN_EXTENSION_NAMES,
+  checkBuiltinExtension,
+  installBuiltinExtension,
+  type BuiltinExtensionName,
+} from "./extensions.js";
+import { AGENTS_TEMPLATE, ensureAgentsFile, getPiPaths } from "./pi-config.js";
+import {
+  DEFAULT_SESSION_NAME_CONFIG,
+  readSessionNameConfig,
+  sessionNameConfigPath,
+  writeSessionNameConfig,
+} from "./session-name.js";
+import { generateSessionTitle } from "./session-title.js";
 import { enhancePrompt, readProviders, SCENE_PROMPTS } from "./enhance.js";
 import { TrayController, trayIconPath } from "./tray.js";
 
@@ -62,13 +83,14 @@ let startupInFlight: Promise<void> | undefined;
 let updateCheckCompleted = false;
 let isQuitting = false;
 let currentTheme = "";
-// 记录 Pi Web 页面实测到的标题栏背景色（顶栏的 --bg-panel），标题栏优先生效该值。
-let currentThemeBackground = "";
+// Pi Web 页面实测到的实时色板与深浅状态；缺失字段由内置色板回退。
+let currentLivePalette: LivePalette = {};
+let currentIsDark = nativeTheme.shouldUseDarkColors;
 // 设置窗口打开时希望定位到的页签，用于从关于面板直接进入增强设置。
 let settingsInitialPane = "appearance";
 // 最近一次运行状态，供界面查询。
 let runningState: RunningState = { runningCount: 0, justFinished: false };
-let status = { message: "", details: "", logPath: "" };
+let status: StatusReport = { message: "", details: "", logPath: "" };
 let startupProgress: StartupProgress = {
   title: "正在启动 Pi Web",
   message: "正在准备本地服务，请稍候…",
@@ -165,11 +187,10 @@ async function restartApplication(): Promise<void> {
   app.exit(0);
 }
 
-async function checkAndUpdateVersions(): Promise<"continue" | "restart" | "quit"> {
+async function checkAndUpdateVersions(versionManager: VersionManager): Promise<"continue" | "restart" | "quit"> {
   if (updateCheckCompleted) return "continue";
   updateCheckCompleted = true;
 
-  const versionManager = new VersionManager(log);
   publishStartupProgress({
     title: "正在检查组件版本",
     message: "正在读取 Pi 和 Pi Web 的本机版本…",
@@ -294,6 +315,163 @@ function showError(error: unknown): void {
   });
 }
 
+/**
+ * 阻断式页面：环境缺失（例如未安装 Node.js/npm）时不进入主界面。
+ * 错误页按 kind 给出针对性说明与按钮，用户处理完可点「重试」重新走一遍启动流程。
+ */
+function showBlockingPage(kind: string, message: string, details: string): void {
+  status = { message, details, logPath: getLogPath(), kind };
+  startupProgress = { title: message, message: details, indeterminate: false };
+  desktopTabs?.dispose();
+  desktopTabs = undefined;
+  void loadLocal("error.html").finally(() => {
+    mainWindow?.show();
+    if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.close();
+  });
+}
+
+/** 未安装 Node.js / npm 时的阻断提示。 */
+function showMissingNpm(): void {
+  log("Environment check failed: npm is not available.");
+  showBlockingPage(
+    "npm-missing",
+    "未检测到 Node.js 与 npm",
+    "Pi Web Box 需要 Node.js 22.19.0 或更高版本（自带 npm）才能运行 pi-web。\n\n"
+      + "请先安装 Node.js，安装完成后回到本页点「重试」。",
+  );
+}
+
+/** 缺少 pi / pi-web 时，把 npm 安装输出投到启动页。 */
+async function installMissingPackages(
+  versionManager: VersionManager,
+  packages: MissingPackage[],
+): Promise<void> {
+  const lines: string[] = [packages.map((item) => `npm install -g ${item.packageName}@latest`).join("\n")];
+  await versionManager.install(packages, (progress) => {
+    if (progress.stage === "output") lines.push(`[${progress.displayName}] ${progress.message}`);
+    if (progress.stage === "completed") lines.push(`[${progress.displayName}] 安装完成`);
+    if (lines.length > 24) lines.splice(1, lines.length - 24);
+    const percent = progress.total > 0
+      ? ((progress.completed + (progress.stage === "completed" ? 0 : 0.5)) / progress.total) * 100
+      : 0;
+    publishStartupProgress({
+      title: `正在安装 ${progress.displayName}`,
+      message: progress.stage === "completed" ? progress.message : "npm 正在下载并安装，请稍候…",
+      detail: lines.join("\n"),
+      percent,
+      indeterminate: progress.stage !== "completed",
+    });
+  });
+}
+
+/**
+ * 启动前的环境自检（设置里手动指定路径的组件不参与「缺失」判定）：
+ * 1. 没有 npm 时阻断启动，提示用户自行安装 Node.js；
+ * 2. pi / pi-web 缺失时让用户选择「一键安装」还是「关闭并退出」；
+ * 3. 通过后交给既有的版本检查与更新逻辑。
+ */
+async function ensureRuntimeEnvironment(
+  versionManager: VersionManager,
+): Promise<"continue" | "quit" | "blocked"> {
+  if (process.env.PI_WEB_BOX_SKIP_ENV_CHECK === "1") {
+    log("Environment check skipped by PI_WEB_BOX_SKIP_ENV_CHECK.");
+    return "continue";
+  }
+  publishStartupProgress({
+    title: "正在检查运行环境",
+    message: "正在检测 Node.js 与 npm…",
+    indeterminate: true,
+  });
+  const check = await versionManager.checkEnvironment(publishVersionCheckProgress);
+  cacheInstalledVersions(check.installed);
+  // 环境自检结果写入日志，便于排查「为什么没有提示安装」或「为什么进了阻断页」。
+  log(
+    `Environment check: npm=${check.npmAvailable ? "available" : "missing"}, `
+    + `installed=[${check.installed.map((item) => `${item.commandName}@${item.currentVersion}`).join(", ")}], `
+    + `missing=[${check.missing.map((item) => item.commandName).join(", ")}].`,
+  );
+  const { nodePath, commandPath } = settingsStore!.get().piWeb;
+  if (!check.npmAvailable && !nodePath.trim()) {
+    showMissingNpm();
+    return "blocked";
+  }
+  // 手动指定过 pi-web 命令路径时，即使不在 PATH 里也不当作缺失。
+  const missing = check.missing.filter((item) => item.commandName !== "pi-web" || !commandPath.trim());
+  if (missing.length === 0) {
+    publishStartupProgress({
+      title: "运行环境检查完成",
+      message: "Node.js、Pi 与 Pi Web 均已就绪，正在检查版本…",
+      percent: 100,
+    });
+    return "continue";
+  }
+
+  log(`Missing packages: ${missing.map((item) => item.packageName).join(", ")}.`);
+  const pending = [...missing];
+  while (pending.length > 0 && mainWindow) {
+    const answer = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "缺少运行组件",
+      message: pending.length > 1 ? "未检测到 Pi 与 Pi Web。" : `未检测到 ${pending[0].displayName}。`,
+      detail: `即将执行：\n${pending.map((item) => `npm install -g ${item.packageName}@latest`).join("\n")}\n\n`
+        + "安装需要联网，过程会在当前窗口显示 npm 输出。",
+      buttons: ["一键安装", "关闭并退出"],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    });
+    if (answer.response !== 0) {
+      log("User quit at the missing-components prompt.");
+      return "quit";
+    }
+
+    try {
+      await installMissingPackages(versionManager, pending);
+    } catch (error) {
+      const details = error instanceof Error ? error.message : String(error);
+      log(`Automatic installation failed: ${details}`);
+      const failed = await dialog.showMessageBox(mainWindow, {
+        type: "error",
+        title: "安装失败",
+        message: "未能自动安装缺失的组件。",
+        detail: `${details}\n\n可检查网络或代理后重试，也可手动执行上面列出的 npm 命令。`,
+        buttons: ["重试安装", "关闭并退出"],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+      });
+      if (failed.response !== 0) return "quit";
+      continue;
+    }
+
+    const installed = await versionManager.getInstalledVersions(publishVersionCheckProgress);
+    cacheInstalledVersions(installed);
+    const stillMissing = pending.filter((item) => !installed.some((entry) => entry.commandName === item.commandName));
+    if (stillMissing.length === 0) {
+      publishStartupProgress({ title: "组件安装完成", message: "正在继续启动 Pi Web…", percent: 100 });
+      return "continue";
+    }
+
+    // 装完了但当前进程的 PATH 还没刷新（新装的全局目录需要重启才能识别）。
+    const retry = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      title: "安装完成但仍未检测到命令",
+      message: `${stillMissing.map((item) => item.displayName).join("、")} 已安装，但当前进程的 PATH 里还没有该命令。`,
+      detail: "退出并重启 Pi Web Box 后进程会重新读取 PATH；也可以在 Box 设置里手动指定命令路径。",
+      buttons: ["重新检测", "退出并重启 Box"],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    });
+    if (retry.response === 1) {
+      await restartApplication();
+      return "quit";
+    }
+    pending.splice(0, pending.length, ...stillMissing);
+  }
+  return "continue";
+}
+
 function isPiWebPage(url: string): boolean {
   try {
     const parsed = new URL(url);
@@ -331,13 +509,27 @@ async function injectVersionPanel(contents = desktopTabs?.active()?.view.webCont
 }
 
 /**
+ * 当前生效色板：优先用 Pi Web 页面实测颜色，读不到时回退到内置色板。
+ * 采用实测值后，pi-web 以后新增主题不需要改 Box 也能自动跟随。
+ */
+function getCurrentPalette(): ThemePalette {
+  return resolvePalette(currentTheme, currentLivePalette, nativeTheme.shouldUseDarkColors);
+}
+
+/** 子窗口与注入脚本共用的主题载荷。 */
+function getThemePayload(): { palette: ThemePalette; theme: string; isDark: boolean } {
+  const palette = getCurrentPalette();
+  return { palette, theme: currentTheme || palette.id, isDark: currentIsDark };
+}
+
+/**
  * 把当前主题应用到主窗口页面内的自绘标题栏。
  * DWM 着色在 Electron 窗口上不生效（调用成功但系统忽略），
  * 所以主窗口也改为页面内绘制，颜色直接跟随 Pi Web 主题。
  */
 async function applyTitleBarTheme(): Promise<void> {
   if (!mainWindow || mainWindow.isDestroyed()) return;
-  mainWindow.webContents.send("pi-web-box:desktop-theme", getPalette(currentTheme, nativeTheme.shouldUseDarkColors));
+  mainWindow.webContents.send("pi-web-box:desktop-theme", getCurrentPalette());
 }
 
 /**
@@ -345,8 +537,7 @@ async function applyTitleBarTheme(): Promise<void> {
  * 这里把主题色板推给它们，颜色由页面自己的变量控制。
  */
 function applyChildTitleBarTheme(): void {
-  const palette = getPalette(currentTheme, nativeTheme.shouldUseDarkColors);
-  const payload = { palette, theme: currentTheme || palette.id };
+  const payload = getThemePayload();
   if (settingsWindow && !settingsWindow.isDestroyed()) {
     settingsWindow.webContents.send("pi-web-box:settings-theme", payload);
   }
@@ -361,11 +552,17 @@ function broadcastThemeToSettings(): void {
   applyChildTitleBarTheme();
 }
 
-function updateTheme(theme: string, background: string): void {
-  const normalized = isKnownTheme(theme) ? theme : "";
-  if (!normalized && !background) return;
-  currentTheme = normalized || currentTheme;
-  currentThemeBackground = background || currentThemeBackground;
+/** 页面上报主题与实时色板：未知主题也能同步，颜色不再受内置色板限制。 */
+function updateTheme(report: ThemeReport): void {
+  const theme = typeof report?.theme === "string" ? report.theme.slice(0, 60) : "";
+  // 兼容早期版本只上报 --bg-panel 的情况。
+  const palette = normalizePalette(report?.palette ?? { background: report?.background });
+  const hasColor = Object.keys(palette).length > 0;
+  if (!theme && !hasColor) return;
+  if (theme) currentTheme = theme;
+  // 每次上报都整体替换，避免旧主题的颜色残留到新主题。
+  if (hasColor) currentLivePalette = palette;
+  if (typeof report?.isDark === "boolean") currentIsDark = report.isDark;
   void applyTitleBarTheme();
   broadcastThemeToSettings();
 }
@@ -403,7 +600,7 @@ function getProviderOptions(): ProviderOption[] {
 function getSettingsSnapshot(): SettingsSnapshot {
   const store = settingsStore!;
   const settings = store.get();
-  const palette = getPalette(currentTheme, nativeTheme.shouldUseDarkColors);
+  const palette = getCurrentPalette();
   return {
     settings: settings as BoxSettingsInput,
     settingsFilePath: store.getFilePath(),
@@ -412,7 +609,9 @@ function getSettingsSnapshot(): SettingsSnapshot {
     theme: palette.id,
     themeLabel: palette.label,
     providers: getProviderOptions(),
-    usageExtension: usageExtensionInfo(),
+    usageExtension: extensionInfo("pi-usage-log"),
+    pi: getPiPaths(),
+    sessionName: getSessionNameState(),
     lanAddress: getLanAddress(),
     about: {
       version: app.getVersion(),
@@ -425,9 +624,19 @@ function getSettingsSnapshot(): SettingsSnapshot {
   };
 }
 
+/** 会话命名面板的状态：配置文件内容 + 插件安装情况。 */
+function getSessionNameState(): SessionNameState {
+  return {
+    config: readSessionNameConfig(),
+    configPath: sessionNameConfigPath(),
+    extension: extensionInfo("pi-session-name"),
+  };
+}
+
 /** 组装注入到页面里的关于面板数据。 */
 function buildPanelData() {
   const { provider, model } = settingsStore!.get().enhance;
+  const palette = getCurrentPalette();
   return {
     ...componentVersions,
     darkIconDataUrl: readIconDataUrl("pi-logo-on-dark.svg"),
@@ -435,23 +644,30 @@ function buildPanelData() {
     github: GITHUB_URL,
     qq: CONTACT_QQ,
     enhanceConfigured: !!(provider && model),
+    // 仅作为页面读不到 CSS 变量时的回退色值。
+    palette,
+    isDark: currentIsDark,
   };
 }
 
 /** 组装提示词增强控件需要的数据。 */
 function buildEnhanceData() {
   const { provider, model } = settingsStore!.get().enhance;
+  const naming = readSessionNameConfig();
   return {
-    palette: getPalette(currentTheme, nativeTheme.shouldUseDarkColors),
+    palette: getCurrentPalette(),
     configured: !!(provider && model),
     scenes: Object.entries(SCENE_PROMPTS).map(([id, scene]) => ({ id, label: scene.label })),
     defaultScene: "general",
+    // 「生成标题」按钮使用会话命名配置里的模型（与自动命名同一个模型）。
+    titleConfigured: !!naming.model,
+    titleModelLabel: naming.model ? `${naming.provider ? `${naming.provider}/` : ""}${naming.model}` : "",
   };
 }
 
-/** 查询 pi-usage-log 是否已安装。开发环境下内置扩展在应用根目录。 */
-function usageExtensionInfo() {
-  return checkUsageLogExtension(process.resourcesPath, app.isPackaged, app.getAppPath());
+/** 查询内置扩展（用量记录 / 会话命名）的安装状态。开发环境下内置扩展在应用根目录。 */
+function extensionInfo(name: BuiltinExtensionName): ExtensionInfo {
+  return checkBuiltinExtension(name, process.resourcesPath, app.isPackaged, app.getAppPath())!;
 }
 
 /** 解析用量查询区间，日期非法时回退到最近 30 天。 */
@@ -472,13 +688,7 @@ function resolveUsageRange(query: UsageQuery): { from: string; to: string } {
 }
 
 function broadcastSettingsChange(): void {
-  const snapshot = getSettingsSnapshot();
-  if (settingsWindow && !settingsWindow.isDestroyed()) {
-    settingsWindow.webContents.send("pi-web-box:settings-theme", {
-      palette: getPalette(currentTheme, nativeTheme.shouldUseDarkColors),
-      theme: currentTheme || snapshot.theme,
-    });
-  }
+  applyChildTitleBarTheme();
 }
 
 function createSettingsWindow(pane?: string): void {
@@ -503,7 +713,7 @@ function createSettingsWindow(pane?: string): void {
     // 不用 Windows 原生标题栏：改用页面自绘的标题栏，
     // 颜色完全跟随 Pi Web 主题，不会出现系统默认灰。
     frame: false,
-    backgroundColor: getPalette(currentTheme, nativeTheme.shouldUseDarkColors).background,
+    backgroundColor: getCurrentPalette().background,
     autoHideMenuBar: true,
     webPreferences: {
       preload: appFilePath(path.join("build", "preload.js")),
@@ -524,11 +734,12 @@ function createSettingsWindow(pane?: string): void {
     void shell.openExternal(url);
   });
 
-  const palette = getPalette(currentTheme, nativeTheme.shouldUseDarkColors);
+  const palette = getCurrentPalette();
   const rendererScript = fs.readFileSync(appFilePath(path.join("build", "settings-renderer.js")), "utf8");
   const html = buildSettingsHtml({
     theme: palette.id,
     systemDark: nativeTheme.shouldUseDarkColors,
+    palette,
     rendererScript,
     darkIconDataUrl: readIconDataUrl("pi-logo-on-dark.svg"),
     lightIconDataUrl: readIconDataUrl("pi-logo-on-light.svg"),
@@ -565,7 +776,7 @@ function createUsageWindow(): void {
     usageWindow.focus();
     return;
   }
-  const palette = getPalette(currentTheme, nativeTheme.shouldUseDarkColors);
+  const palette = getCurrentPalette();
   const rendererScript = fs.readFileSync(appFilePath(path.join("build", "usage-renderer.js")), "utf8");
 
   // 默认展示今天，符合“先看今天用了多少”的习惯。
@@ -575,6 +786,7 @@ function createUsageWindow(): void {
   const html = buildUsageHtml({
     theme: palette.id,
     systemDark: nativeTheme.shouldUseDarkColors,
+    palette,
     rendererScript,
     darkIconDataUrl: readIconDataUrl("pi-logo-on-dark.svg"),
     lightIconDataUrl: readIconDataUrl("pi-logo-on-light.svg"),
@@ -726,7 +938,15 @@ async function startPiWeb(): Promise<void> {
     await loadLocal("startup.html");
     mainWindow?.show();
     try {
-      const updateAction = await checkAndUpdateVersions();
+      const versionManager = new VersionManager(log);
+      // 先确认本机具备 Node.js/npm 与 pi、pi-web，再进入版本检查。
+      const environment = await ensureRuntimeEnvironment(versionManager);
+      if (environment === "quit") {
+        app.quit();
+        return;
+      }
+      if (environment === "blocked") return;
+      const updateAction = await checkAndUpdateVersions(versionManager);
       if (updateAction === "restart") return;
       if (updateAction === "quit") {
         app.quit();
@@ -759,7 +979,7 @@ function publishDesktopState(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   if (desktopTabs) mainWindow.webContents.send("pi-web-box:desktop-state", desktopTabs.snapshot(noticeStore?.unreadCount() ?? 0));
   const theme = desktopTabs?.active()?.theme;
-  if (theme && theme.theme !== currentTheme) updateTheme(theme.theme, theme.background);
+  if (theme && theme.theme !== currentTheme) updateTheme(theme);
   else void applyTitleBarTheme();
 }
 
@@ -1124,21 +1344,7 @@ ipcMain.handle("pi-web-box:close-settings", () => {
   if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.close();
 });
 
-// 手动重新同步标题栏：让页面重新上报一次主题，再把三个窗口的标题栏都画一遍。
-ipcMain.handle("pi-web-box:refresh-titlebar", async () => {
-  currentThemeBackground = "";
-  await applyTitleBarTheme();
-  try {
-    await desktopTabs?.active()?.view.webContents.executeJavaScript(
-      "window.__piWebBoxThemeSync?.report?.();", true,
-    );
-  } catch (error) {
-    log(`Could not re-report theme: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  applyChildTitleBarTheme();
-  log("Title bar appearance refreshed manually.");
-});
-
+// 主题与色板全自动同步（页面 CSS 变量变化会实时上报），不需要手动刷新入口。
 ipcMain.handle("pi-web-box:open-settings", (_event, pane?: string) => {
   createSettingsWindow(typeof pane === "string" ? pane : undefined);
 });
@@ -1209,18 +1415,100 @@ ipcMain.handle("pi-web-box:query-usage", async (_event, query: UsageQuery) => {
   }
 });
 
-// 检测与一键安装 pi-usage-log 插件。
-ipcMain.handle("pi-web-box:check-usage-extension", () => usageExtensionInfo());
+/** 内置扩展只允许已知名称：渲染进程不能自由指定文件路径。 */
+function resolveExtensionName(value: unknown): BuiltinExtensionName | undefined {
+  return BUILTIN_EXTENSION_NAMES.find((name) => name === value);
+}
 
-ipcMain.handle("pi-web-box:install-usage-extension", async (): Promise<SaveSettingsResult> => {
-  const result = await installUsageLogExtension(process.resourcesPath, app.isPackaged, app.getAppPath());
-  if (result.ok) log(`Installed usage extension into ${piAgentDirectory()}.`);
-  else log(`Could not install usage extension: ${result.message}`);
+ipcMain.handle("pi-web-box:check-extension", (_event, name: unknown) => {
+  const target = resolveExtensionName(name);
+  return target ? extensionInfo(target) : undefined;
+});
+
+ipcMain.handle("pi-web-box:install-extension", async (_event, name: unknown): Promise<SaveSettingsResult> => {
+  const target = resolveExtensionName(name);
+  if (!target) return { ok: false, message: "未知的内置扩展。" };
+  const result = await installBuiltinExtension(target, process.resourcesPath, app.isPackaged, app.getAppPath());
+  if (result.ok) log(`Installed builtin extension ${target} into ${result.status?.installPath ?? ""}.`);
+  else log(`Could not install builtin extension ${target}: ${result.message}`);
   return {
     ok: result.ok,
     message: result.message,
     snapshot: result.ok ? getSettingsSnapshot() : undefined,
   };
+});
+
+// pi 全局 AGENTS.md 不存在时给出一个最小模板，避免用户在文件管理器里手建。
+/**
+ * 「Pi 配置」面板的打开入口：只接受两个固定目标，
+ * 目标路径在主进程内解析，渲染进程无法传入任意路径。
+ */
+ipcMain.handle("pi-web-box:open-pi-path", async (_event, target: unknown) => {
+  const kind = target === "agents" || target === "directory" ? target : "";
+  if (!kind) return { ok: false, message: "未知的目标位置。" };
+  const paths = getPiPaths();
+  const file = kind === "agents" ? paths.agentsFile : paths.directory;
+  if (!fs.existsSync(file)) {
+    return { ok: false, message: kind === "agents" ? "AGENTS.md 不存在，可先点「新建」创建。" : "pi 目录不存在。" };
+  }
+  const failure = await shell.openPath(file);
+  if (!failure) return { ok: true, message: "" };
+  // .md 没有关联默认程序时退回「在文件管理器中选中」，至少能让用户看到文件。
+  if (kind === "agents") {
+    shell.showItemInFolder(file);
+    return { ok: true, message: "已在文件管理器中定位 AGENTS.md。" };
+  }
+  return { ok: false, message: failure };
+});
+
+ipcMain.handle("pi-web-box:create-agents-file", async (): Promise<SaveSettingsResult> => {
+  try {
+    const result = ensureAgentsFile();
+    if (!result.created) return { ok: true, message: "AGENTS.md 已存在", snapshot: getSettingsSnapshot() };
+    log(`Created pi global AGENTS.md at ${result.paths.agentsFile}.`);
+    return { ok: true, message: "已创建 AGENTS.md", snapshot: getSettingsSnapshot() };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+// 会话命名配置：写入 pi 的 agent 目录，插件每次命名前重新读取，因此保存后即刻生效。
+ipcMain.handle("pi-web-box:save-session-name", async (_event, input: SessionNameConfig): Promise<SaveSettingsResult> => {
+  try {
+    writeSessionNameConfig(input);
+    // 配置即刻生效；顺手刷新页面里注入的控件，让「生成标题」的模型提示跟着更新。
+    for (const tab of desktopTabs?.all() ?? []) void injectVersionPanel(tab.view.webContents);
+    log("Session name config saved.");
+    return { ok: true, message: "已保存，即刻生效", snapshot: getSettingsSnapshot() };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
+});
+
+// Pi Web 输入框旁的「生成标题」：直接读会话内容、用命名模型生成标题并写回会话名。
+// 不依赖插件是否已更新到最新版本，因此点击即可用。
+ipcMain.handle("pi-web-box:generate-session-title", async (event: Electron.IpcMainInvokeEvent): Promise<SessionTitleResult> => {
+  const tab = desktopTabs?.fromContents(event.sender);
+  if (!tab || !desktopTabs || event.senderFrame !== event.sender.mainFrame
+    || !isServiceUrl(event.sender.getURL(), desktopTabs.origin)) {
+    return { ok: false, message: "当前页面无权生成标题。" };
+  }
+  const naming = readSessionNameConfig();
+  const result = await generateSessionTitle({
+    origin: desktopTabs.origin,
+    password: settingsStore?.get().piWeb.password,
+    sessionId: tab.sessionId,
+    provider: naming.provider,
+    model: naming.model,
+  });
+  if (result.ok) {
+    log(`Generated session title for ${tab.sessionId}: ${result.name}.`);
+    // 名称已写回会话文件：立刻重拉一次会话列表，标签标题不用等下一次轮询。
+    void fetchRunningSessions();
+  } else {
+    log(`Could not generate session title: ${result.message}`);
+  }
+  return result;
 });
 
 // 提示词增强：在主进程发起请求，API Key 不进入渲染进程。
@@ -1247,12 +1535,12 @@ ipcMain.handle("pi-web-box:open-external", async (_event, url: string) => {
   if (typeof url === "string" && /^https?:\/\//i.test(url)) await shell.openExternal(url);
 });
 
-// Pi Web 页面回传主题：同步 Windows 原生标题栏，让界面保持一体感。
+// Pi Web 页面回传主题与实时色板：同步主窗口与子窗口配色。
 ipcMain.on("pi-web-box:report-theme", (event, report: ThemeReport) => {
   const tab = desktopTabs?.fromContents(event.sender);
   if (!tab || typeof report?.theme !== "string" || typeof report?.background !== "string") return;
   tab.theme = { theme: report.theme, background: report.background };
-  if (tab.id === desktopTabs?.active()?.id) updateTheme(report.theme, report.background);
+  if (tab.id === desktopTabs?.active()?.id) updateTheme(report);
 });
 
 // 旧版本通过环境变量传配置，这里把仍在使用的值固化成设置文件，

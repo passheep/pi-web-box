@@ -6,7 +6,7 @@ electronDownload:
 asar: true
 releaseInfo:
   # Release 页展示的更新日志，与随包发布的版本保持一致。
-  releaseNotesFile: release-notes/v0.7.3.md
+  releaseNotesFile: release-notes/v0.7.5.md
 directories:
   output: dist
 files:
@@ -18,13 +18,14 @@ extraResources:
   - from: assets
     to: assets
   # 内置 pi 扩展：用户可在 Box 设置里一键安装到 pi 的扩展目录，
-  # 用于记录 token 用量，使统计功能在任意机器上都能工作。
-  # 只随包发布运行所需文件，自带测试不进入安装包。
+  # 用于记录 token 用量、为新会话自动命名。
+  # pi-session-name 连自带的 index.test.ts 一起发布：Box 安装时会把它
+  # 同步到用户的扩展目录，保证本地测试与新的可配置实现保持一致。
   - from: extensions
     to: extensions
     filter:
       - "**/*"
-      - "!**/*.test.ts"
+      - "!**/pi-usage-log/**/*.test.ts"
 win:
   target:
     # portable：单文件便携版，双击即用，无需安装。

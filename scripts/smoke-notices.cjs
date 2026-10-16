@@ -7,7 +7,8 @@ app.setPath('userData', fs.mkdtempSync(path.join(os.tmpdir(), 'box-notice-pages-
 const wait = ms => new Promise(r => setTimeout(r, ms));
 let win, store; const queries = [];
 const timer = setTimeout(() => finish(1), 20000);
-async function until(fn) { for(let i=0;i<100;i++){if(await fn()) return; await wait(40);} throw Error('等待分页超时'); }
+// 等待预算给到 10s：机器在跑构建/杀毒扫描时首次渲染会明显变慢（仍远小于 20s 看门狗）。
+async function until(fn) { for(let i=0;i<250;i++){if(await fn()) return; await wait(40);} throw Error('等待分页超时'); }
 (async () => {
   await app.whenReady();
   store = new NoticeStore(':memory:');
