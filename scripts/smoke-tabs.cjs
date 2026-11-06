@@ -31,8 +31,12 @@ const server = http.createServer((req, res) => {
   } else {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     res.end(`<!doctype html><meta charset="utf-8"><title>测试页面</title><body>
-    <!-- 模拟 pi-web 输入框上方工具栏：标题为 “Change model” 的按钮是增强控件的锚点 -->
-    <div id="toolbar"><div class="group"><button id="modelBtn" title="Change model">模型</button></div></div>
+    <!-- 模拟 pi-web 0.15 的中文输入区：模型按钮 title 已本地化，不再是 “Change model” -->
+    <div class="chat-input-controls">
+      <div id="toolbar" class="group">
+        <div class="model-selector"><button id="modelBtn" aria-haspopup="listbox" title="更换模型">模型</button></div>
+      </div>
+    </div>
     <textarea class="chat-input-textarea"></textarea>
     <script>
       const id = new URL(location.href).searchParams.get('session');
@@ -181,7 +185,7 @@ async function queryStatus(origin) { const result = await fetchSessionStatus(ori
   });
   const panelPage = tabs.active().view.webContents;
   await checkUntil(
-    () => panelPage.executeJavaScript(`!!document.querySelector('button[title="Change model"]')`),
+    () => panelPage.executeJavaScript(`!!document.querySelector('button[aria-haspopup="listbox"]')`),
     "测试页面缺少模型按钮锚点",
   );
   await panelPage.executeJavaScript(buildEnhancePanelScript({
@@ -203,8 +207,13 @@ async function queryStatus(origin) { const result = await fetchSessionStatus(ori
       labels: [...root.querySelector(".wrap").querySelectorAll("button")].map((button) => button.textContent.trim()),
       titleTooltip: root.getElementById("title").title,
       anchoredInToolbar: host.parentElement.id === "toolbar",
+      visible: host.style.visibility !== "hidden",
+      modelTitle: document.getElementById("modelBtn").title,
     };
   })()`);
+  // 中文界面（title=「更换模型」）下控件仍须出现并归位，不能像旧实现那样被隐藏。
+  assert.equal(panel.modelTitle, "更换模型");
+  assert.equal(panel.visible, true);
   // 工具栏按钮顺序：增强 → 生成标题（紧接着，回到底部是悬浮按钮排在后面）。
   assert.deepEqual(panel.labels.slice(0, 2), ["增强", "生成标题"]);
   assert.equal(panel.anchoredInToolbar, true);
@@ -215,7 +224,7 @@ async function queryStatus(origin) { const result = await fetchSessionStatus(ori
     "点击生成标题后未回显新标题",
   );
   assert.equal(titleCalls, 1);
-  console.log("PASS 「生成标题」按钮位于「增强」右侧，点击后经主进程写回并回显新标题");
+  console.log("PASS 中文 pi-web 0.15 输入区仍显示「增强 / 生成标题」，点击后经主进程写回并回显新标题");
   assert.equal(errors.length, 0, errors.join("\n"));
 })().then(() => finish(0), (error) => { console.error(error); finish(1); });
 function finish(code) {

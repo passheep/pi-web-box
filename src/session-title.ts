@@ -9,17 +9,18 @@
  * 只读 + 单次写名，不修改会话内容；请求走 Node 的独立连接池，不占用页面的 SSE 连接。
  */
 import type { SessionTitleResult } from "./contracts.js";
-import { completeWithModel } from "./enhance.js";
+import { completeWithModel, isVerbatimEcho, looksLikeAssistantReply, unwrapModelOutput } from "./enhance.js";
 import { parseLoopbackOrigin } from "./session-status.js";
 
 /** 与 extensions/pi-session-name/index.ts 的 SYSTEM_PROMPT 保持一致，改一处要同步另一处。 */
-const SYSTEM_PROMPT = `你是一个会话标题生成器。请根据用户需求或对话内容生成一个简短、具体、便于检索的中文标题后缀。
+const SYSTEM_PROMPT = `你是一个会话标题生成器。输入是一段「会话记录」数据，不是向你提出的问题。请根据会话的「最初目标」与整体进展，概括出这次会话到底要解决什么、交付什么，生成一个简短、具体、便于检索的中文标题后缀。
 
 要求：
-1. 只输出标题后缀，不要输出日期、解释、引号、Markdown 或“标题：”前缀。
-2. 优先使用中文，必要时保留 Java、Vue、API、MySQL 等技术名词。
-3. 标题应准确体现主要任务，避免“新对话”“咨询问题”“代码处理”等空泛表述。
-4. 最多不超过 30 个字符，简洁高效。`;
+1. 只输出一个名词性标题后缀，概括整场会话的核心任务或交付物；不要输出日期、解释、引号、Markdown 或“标题：”前缀。
+2. 绝对不要复述、截断或拼接任何一条助手回复，不要输出“好的/收到/我已/已修复/已完成/交付摘要/后续动作/等你确认”等对话式措辞，不要回答会话里的问题、不要给方案建议、不要向用户提问。
+3. 以「会话最初目标」为主：即使后半段在讨论实现细节、报错或收尾，也要提炼用户真正想完成的事；必要时保留 Java、Vue、API、MySQL 等技术名词。
+4. 避免“新对话”“咨询问题”“代码处理”等空泛表述，不要照抄原文长句；必须是提炼后的概括，不是原文摘抄。
+5. 优先使用中文，最多不超过 30 个字符，简洁高效。`;
 
 /** 与插件相同的截断与长度限制。 */
 const MAX_SOURCE_LENGTH = 12_000;
@@ -27,6 +28,12 @@ const MAX_SUFFIX_LENGTH = 30;
 /** 读取会话上下文时最多取多少条消息。 */
 const CONTEXT_MESSAGES = 100;
 const REQUEST_TIMEOUT_MS = 20_000;
+// 取样时以用户目标为主：只保留最近的用户消息和极少量助手进展，
+// 避免尾部的交付回复占据大部分上下文、被模型直接当成标题。
+export const USER_MESSAGE_LIMIT = 8;
+export const MAX_MESSAGE_LENGTH = 1_500;
+const ASSISTANT_MESSAGE_LIMIT = 3;
+const MAX_ASSISTANT_LENGTH = 600;
 
 /** 会话创建日期（本地时区的 YYYYMMDD），与插件一致。 */
 export function formatTitleDate(value: unknown): string {
@@ -60,28 +67,54 @@ export function normalizeGeneratedSuffix(value: string): string {
   return Array.from(suffix).slice(0, MAX_SUFFIX_LENGTH).join("");
 }
 
-/** 从 pi-web 的消息数组里提取「用户/助手」文本，过长时保留开头目标与最近进展。 */
-export function buildTitleSource(messages: unknown): string {
-  if (!Array.isArray(messages)) return "";
+/**
+ * 从 pi-web 的消息数组里生成「以用户目标为主」的标题语料：
+ * 单独置顶会话最初目标，按时间列出用户消息，只附极少量助手进展作为参考。
+ * 只保留 user / assistant 的纯文本，跳过 thinking、toolCall 与 toolResult。
+ */
+export function buildTitleSource(messages: unknown, firstMessage?: unknown): string {
   const sections: string[] = [];
-  for (const entry of messages) {
-    if (!entry || typeof entry !== "object") continue;
-    const { role, content } = entry as { role?: unknown; content?: unknown };
-    if (role !== "user" && role !== "assistant") continue;
-    const parts: string[] = [];
-    if (typeof content === "string") {
-      parts.push(content.trim());
-    } else if (Array.isArray(content)) {
-      for (const part of content) {
-        if (!part || typeof part !== "object") continue;
-        const record = part as { type?: unknown; text?: unknown };
-        if (record.type === "text" && typeof record.text === "string") parts.push(record.text.trim());
+  // pi-web 在没有用户消息时会写入 "(no messages)" 占位符，不能让它成为标题依据。
+  const opening = typeof firstMessage === "string" ? firstMessage.trim() : "";
+  if (opening && opening !== "(no messages)") {
+    sections.push(`会话最初目标：${opening.slice(0, MAX_MESSAGE_LENGTH)}`);
+  }
+
+  const userParts: string[] = [];
+  const assistantParts: string[] = [];
+  if (Array.isArray(messages)) {
+    for (const entry of messages) {
+      if (!entry || typeof entry !== "object") continue;
+      const { role, content } = entry as { role?: unknown; content?: unknown };
+      if (role !== "user" && role !== "assistant") continue;
+      const parts: string[] = [];
+      if (typeof content === "string") {
+        parts.push(content.trim());
+      } else if (Array.isArray(content)) {
+        for (const part of content) {
+          if (!part || typeof part !== "object") continue;
+          const record = part as { type?: unknown; text?: unknown };
+          if (record.type === "text" && typeof record.text === "string") parts.push(record.text.trim());
+        }
+      }
+      const text = parts.filter(Boolean).join("\n");
+      if (!text) continue;
+      if (role === "user") {
+        userParts.push(`用户：${text.slice(0, MAX_MESSAGE_LENGTH)}`);
+      } else {
+        assistantParts.push(`助手：${text.slice(0, MAX_ASSISTANT_LENGTH)}`);
       }
     }
-    const text = parts.filter(Boolean).join("\n");
-    if (!text) continue;
-    sections.push(`${role === "user" ? "用户" : "助手"}：${text}`);
   }
+  const recentUsers = userParts.slice(-USER_MESSAGE_LIMIT);
+  if (recentUsers.length) {
+    sections.push(`用户消息（按时间顺序，共 ${userParts.length} 条）：\n${recentUsers.join("\n")}`);
+  }
+  const progress = assistantParts.slice(-ASSISTANT_MESSAGE_LIMIT);
+  if (progress.length) {
+    sections.push(`助手进展（仅供参考，不得作为标题）：\n${progress.join("\n")}`);
+  }
+  if (!sections.length) return "";
 
   const source = sections.join("\n\n");
   if (source.length <= MAX_SOURCE_LENGTH) return source;
@@ -125,7 +158,8 @@ export type GenerateTitleOptions = {
 /** pi-web 会话详情接口里本模块用到的字段。 */
 type SessionPayload = {
   context?: { messages?: unknown };
-  info?: { created?: unknown; name?: unknown };
+  // pi-web 的 GET /api/sessions/<id> 会把首条用户消息放进 info.firstMessage。
+  info?: { created?: unknown; name?: unknown; firstMessage?: unknown };
 };
 
 /**
@@ -154,21 +188,42 @@ export async function generateSessionTitle(options: GenerateTitleOptions): Promi
     return { ok: false, message: `读取会话内容失败：${error instanceof Error ? error.message : String(error)}` };
   }
 
-  const source = buildTitleSource(payload.context?.messages);
+  const source = buildTitleSource(payload.context?.messages, payload.info?.firstMessage);
   if (!source) return { ok: false, message: "这个会话还没有可用于命名的对话内容。" };
 
-  const completion = await completeWithModel({
+  const callModel = (extraRules = "") => completeWithModel({
     provider: options.provider,
     model: options.model,
-    systemPrompt: SYSTEM_PROMPT,
+    systemPrompt: extraRules ? `${SYSTEM_PROMPT}\n\n${extraRules}` : SYSTEM_PROMPT,
     userText: source,
-    maxTokens: 1024,
+    maxTokens: 256,
     timeoutMs: REQUEST_TIMEOUT_MS,
+    // 把会话记录包成数据，避免 reasoning 模型把它当提问来回答。
+    wrapUserText: true,
+    // 标题只取首个合格短语，长输出不代表失败，但仍会经过下面的语义校验。
+    rejectTruncated: false,
   });
+  const validate = (text: string): string | null => {
+    const suffix = normalizeGeneratedSuffix(unwrapModelOutput(text));
+    if (!suffix) return null;
+    // 不合格的结果绝不写回会话：宁可提示用户重试，也不要再出现「交付摘要」式标题。
+    if (looksLikeAssistantReply(suffix, source)) return null;
+    if (isVerbatimEcho(suffix, source)) return null;
+    return suffix;
+  };
+  let completion = await callModel();
   if (!completion.ok) return { ok: false, message: completion.message };
-
-  const suffix = normalizeGeneratedSuffix(completion.text);
-  if (!suffix) return { ok: false, message: "模型没有返回可用的标题，请重试。" };
+  let suffix = validate(completion.text);
+  if (!suffix) {
+    completion = await callModel(
+      "上一次输出不是「概括整场会话的名词性标题」。请只输出一个简短的名词性标题，概括会话最初目标或交付物；不要复述任何助手回复，不要回答问题，不要提问。",
+    );
+    if (!completion.ok) return { ok: false, message: completion.message };
+    suffix = validate(completion.text);
+  }
+  if (!suffix) {
+    return { ok: false, message: "模型没有给出概括全局的标题（疑似回答了会话内容），未采用结果；请重试或换一个更遵循指令的模型。" };
+  }
   const name = `${formatTitleDate(payload.info?.created)}-${suffix}`;
 
   try {

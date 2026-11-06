@@ -17,8 +17,10 @@ const PANEL_ID = "pi-web-box-enhance";
 /**
  * 生成注入到 Pi Web 输入区的提示词增强控件。
  *
- * 定位策略：pi-web 没有稳定的类名，这里以 title="Change model" 的按钮作为锚点，
- * 找到它所在的那一行按钮容器后把控件插入容器末尾，避免依赖易变的类名。
+ * 定位策略：优先用输入区的 DOM 结构定位（.model-selector 里的 listbox 按钮、
+ * .chat-input-controls 的第一组按钮），而不是按钮的 title。pi-web 0.14 起
+ * title 会随界面语言与模型状态变化，写死 "Change model" 会让中文界面下的
+ * 整个控件被永久隐藏；最后再保留英文 title 兜底以兼容早期版本。
  */
 export function buildEnhancePanelScript(data: EnhancePanelData): string {
   const payload = JSON.stringify({
@@ -285,12 +287,34 @@ export function buildEnhancePanelScript(data: EnhancePanelData): string {
   // ── 控件归位 ──
   // pi-web 是客户端渲染的：页面刚打开时工具栏可能还没挂载。
   // 未找到锚点前先隐藏控件，避免它先在左侧出现、等模型加载完成后再跳位。
-  let placedInToolbar = false;
-  const placePanel = () => {
-    const anchor = [...document.querySelectorAll("button")].find(
+  //
+  // 定位策略不依赖界面语言：pi-web 0.14 起模型按钮的 title 会随语言与状态变化
+  //（zh-CN「更换模型」、zh-TW「更換模型」、切换中「正在切换模型」、
+  // 无可用模型「没有可用模型」…）。旧实现写死 title === "Change model"，
+  // 中文界面下永远找不到锚点，整个控件就被 visibility:hidden 藏起来了。
+  const findToolbarRow = () => {
+    // 首选：模型选择器是输入区里的 .model-selector，按钮是它的 listbox 触发器；
+    // 这两个结构不随语言、禁用态或模型名变化。
+    const modelButton = document.querySelector('.model-selector button[aria-haspopup="listbox"]') ||
+      document.querySelector('button[aria-haspopup="listbox"]');
+    if (modelButton) {
+      return modelButton.closest(".model-selector")?.parentElement ||
+        modelButton.parentElement?.parentElement || modelButton.parentElement || null;
+    }
+    // 次选：按钮结构若调整、或没有可用模型（此时 pi-web 不渲染模型按钮），
+    // 直接把控件挂到 .chat-input-controls 的第一组，仍在输入框底部那一行。
+    const controls = document.querySelector(".chat-input-controls");
+    if (controls?.firstElementChild?.tagName === "DIV") return controls.firstElementChild;
+    // 兜底：兼容早期 pi-web 与冒烟页面，唯一稳定线索是未本地化的英文 title。
+    const legacy = [...document.querySelectorAll("button")].find(
       (button) => (button.getAttribute("title") || "").trim() === "Change model",
     );
-    const row = anchor?.parentElement?.parentElement || anchor?.parentElement;
+    return legacy?.parentElement?.parentElement || legacy?.parentElement || null;
+  };
+
+  let placedInToolbar = false;
+  const placePanel = () => {
+    const row = findToolbarRow();
     if (row) {
       if (host.parentElement !== row) row.appendChild(host);
       // 回到工具栏后清掉兜底定位与隐藏状态。

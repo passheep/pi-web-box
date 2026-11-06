@@ -12,6 +12,8 @@ import {
   formatTitleDate,
   generateSessionTitle,
   normalizeGeneratedSuffix,
+  MAX_MESSAGE_LENGTH,
+  USER_MESSAGE_LIMIT,
 } from "../src/session-title.js";
 
 /** 让 enhance 读取临时 models.json，避免依赖真实 pi 配置。 */
@@ -74,7 +76,10 @@ test("buildTitleSource 提取用户与助手文本，忽略思考与工具调用
     { role: "toolResult", content: [{ type: "text", text: "工具输出也要忽略" }] },
     { role: "user", content: "再补一个测试" },
   ]);
-  assert.equal(source, "用户：帮我改登录接口\n\n助手：先看接口实现\n\n用户：再补一个测试");
+  assert.equal(
+    source,
+    "用户消息（按时间顺序，共 2 条）：\n用户：帮我改登录接口\n用户：再补一个测试\n\n助手进展（仅供参考，不得作为标题）：\n助手：先看接口实现",
+  );
   assert.ok(!source.includes("内部推理"));
   assert.ok(!source.includes("工具输出"));
 });
@@ -84,15 +89,32 @@ test("buildTitleSource 对非法输入返回空串", () => {
   assert.equal(buildTitleSource("not an array"), "");
   assert.equal(buildTitleSource([{ role: "user", content: "   " }]), "");
   assert.equal(buildTitleSource([null, 7, { role: "system", content: "忽略" }]), "");
+  // pi-web 对空会话写入的占位符不能成为标题依据。
+  assert.equal(buildTitleSource(undefined, "(no messages)"), "");
 });
 
-test("buildTitleSource 过长时保留开头目标与最近进展", () => {
+test("buildTitleSource 按消息条数与长度双重限制标题语料", () => {
   const long = "甲".repeat(20_000);
   const source = buildTitleSource([{ role: "user", content: long }]);
-  assert.ok(source.length <= 12_000 + 20);
-  assert.match(source, /中间内容已省略/);
-  assert.ok(source.startsWith("用户：甲"));
+  assert.ok(source.length <= MAX_MESSAGE_LENGTH + 60);
+  assert.ok(source.startsWith("用户消息（按时间顺序，共 1 条）：\n用户：甲"));
   assert.ok(source.endsWith("甲"));
+
+  const many = Array.from({ length: 20 }, (_, index) => ({ role: "user", content: `第${index + 1}条用户消息` }));
+  const sampled = buildTitleSource(many);
+  assert.match(sampled, /共 20 条/);
+  assert.doesNotMatch(sampled, /第1条用户消息|第12条用户消息/);
+  assert.match(sampled, /第13条用户消息[\s\S]*第20条用户消息/);
+});
+
+test("buildTitleSource 组装超长会话时仍保留开头目标与最近进展", () => {
+  const long = "乙".repeat(MAX_MESSAGE_LENGTH);
+  const messages = Array.from({ length: USER_MESSAGE_LIMIT }, (_, index) => ({ role: "user", content: `${index}:${long}` }));
+  const source = buildTitleSource(messages);
+  assert.ok(source.length <= 12_000 + 40);
+  assert.match(source, /中间内容已省略/);
+  assert.ok(source.startsWith("用户消息（按时间顺序，共 8 条）：\n用户：0:乙"));
+  assert.ok(source.endsWith("乙"));
 });
 
 test("normalizeGeneratedSuffix 与插件规则一致", () => {
@@ -116,7 +138,7 @@ test("generateSessionTitle 读对话、调用模型并写回会话名", async ()
   const { result, requests } = await withStubbedFetch(
     (url) => {
       if (url.includes("/api/sessions/session-1?")) {
-        return { body: { context: { messages: [{ role: "user", content: [{ type: "text", text: "实现自动命名" }] }] }, info: { created: "2026-10-16T01:13:55.279Z" } } };
+        return { body: { context: { messages: [{ role: "user", content: [{ type: "text", text: "实现自动命名" }] }] }, info: { created: "2026-10-16T01:13:55.279Z", firstMessage: "实现自动命名" } } };
       }
       if (url.endsWith("/chat/completions")) {
         return { body: { choices: [{ message: { content: "标题：自动命名插件开发" } }] } };
@@ -141,6 +163,15 @@ test("generateSessionTitle 读对话、调用模型并写回会话名", async ()
   // 2) 调模型：走 models.json 里的 baseUrl
   assert.match(requests[1].url, /^http:\/\/127\.0\.0\.1:9\/v1\/chat\/completions$/);
   assert.equal((requests[1].init.headers as Record<string, string>).Authorization, "Bearer test-key");
+  const modelBody = JSON.parse(String(requests[1].init.body)) as {
+    max_tokens: number;
+    messages: Array<{ role: string; content: string }>;
+  };
+  assert.equal(modelBody.max_tokens, 256);
+  assert.match(modelBody.messages[0].content, /不要复述/);
+  const wrapped = JSON.parse(modelBody.messages[1].content) as { instruction: string; input: string };
+  assert.match(wrapped.instruction, /input data/);
+  assert.match(wrapped.input, /会话最初目标：实现自动命名/);
   // 3) 写回会话名
   assert.equal(requests[2].init.method, "PATCH");
   assert.deepEqual(JSON.parse(String(requests[2].init.body)), { name: "20261016-自动命名插件开发" });
@@ -201,4 +232,94 @@ test("generateSessionTitle 把读取失败、空对话与模型错误如实返�
     () => generateSessionTitle({ origin: "http://127.0.0.1:30141", sessionId: "s", provider: "test", model: "naming-model" }),
   );
   assert.deepEqual(modelFailure.result, { ok: false, message: "模型返回 HTTP 401：unauthorized" });
+});
+
+test("buildTitleSource 单独置顶会话最初目标，忽略空会话占位符", () => {
+  const source = buildTitleSource(
+    [
+      { role: "user", content: "帮我适配 pi-web 0.15" },
+      { role: "assistant", content: "已修复并打包完成，版本 v0.7.6" },
+    ],
+    "帮我适配 pi-web 0.15 输入框并打包",
+  );
+  assert.ok(source.startsWith("会话最初目标：帮我适配 pi-web 0.15 输入框并打包"));
+  assert.match(source, /用户消息（按时间顺序，共 1 条）/);
+  assert.match(source, /助手进展（仅供参考，不得作为标题）/);
+  assert.equal(buildTitleSource(undefined, "(no messages)"), "");
+});
+
+test("generateSessionTitle 两次返回助手回复时重试且不写回会话名", async () => {
+  useFakeModels();
+  let modelCalls = 0;
+  const { result, requests } = await withStubbedFetch(
+    (url) => {
+      if (url.includes("/api/sessions/session-1?")) {
+        return {
+          body: {
+            context: {
+              messages: [
+                { role: "user", content: "帮我改登录接口" },
+                { role: "assistant", content: "已修复并打包完成，版本 v0.7.6" },
+              ],
+            },
+            info: { created: "2026-10-16T01:13:55.279Z", firstMessage: "帮我改登录接口" },
+          },
+        };
+      }
+      if (url.endsWith("/chat/completions")) {
+        modelCalls += 1;
+        return { body: { choices: [{ message: { content: "已修复并打包完成，版本 v0.7.6" } }] } };
+      }
+      return { body: { ok: true } };
+    },
+    () => generateSessionTitle({
+      origin: "http://127.0.0.1:30141",
+      sessionId: "session-1",
+      provider: "test",
+      model: "naming-model",
+    }),
+  );
+
+  assert.equal(modelCalls, 2);
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.message, /未采用结果/);
+  assert.equal(requests.filter((item) => item.init.method === "PATCH").length, 0);
+});
+
+test("generateSessionTitle 拒绝照抄助手回复，第二次给出合格标题后写回", async () => {
+  useFakeModels();
+  let modelCalls = 0;
+  const { result, requests } = await withStubbedFetch(
+    (url) => {
+      if (url.includes("/api/sessions/session-1?")) {
+        return {
+          body: {
+            context: {
+              messages: [
+                { role: "user", content: "帮我适配输入框控件" },
+                { role: "assistant", content: "已修复并打包完成，版本 v0.7.6" },
+              ],
+            },
+            info: { created: "2026-10-16T01:13:55.279Z", firstMessage: "帮我适配输入框控件" },
+          },
+        };
+      }
+      if (url.endsWith("/chat/completions")) {
+        modelCalls += 1;
+        const content = modelCalls === 1 ? "已修复并打包完成，版本 v0.7.6" : "适配输入框控件并打包";
+        return { body: { choices: [{ message: { content } }] } };
+      }
+      return { body: { ok: true } };
+    },
+    () => generateSessionTitle({
+      origin: "http://127.0.0.1:30141",
+      sessionId: "session-1",
+      provider: "test",
+      model: "naming-model",
+    }),
+  );
+
+  assert.equal(modelCalls, 2);
+  assert.deepEqual(result, { ok: true, name: "20261016-适配输入框控件并打包" });
+  assert.equal(requests.filter((item) => item.init.method === "PATCH").length, 1);
 });
