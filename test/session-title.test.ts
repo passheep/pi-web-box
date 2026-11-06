@@ -62,7 +62,7 @@ async function withStubbedFetch<T>(
   }
 }
 
-test("buildTitleSource 提取用户与助手文本，忽略思考与工具调用", () => {
+test("buildTitleSource 只取用户文本，助手回复不得进入标题语料", () => {
   const source = buildTitleSource([
     { role: "user", content: [{ type: "text", text: "帮我改登录接口" }] },
     {
@@ -78,10 +78,19 @@ test("buildTitleSource 提取用户与助手文本，忽略思考与工具调用
   ]);
   assert.equal(
     source,
-    "用户消息（按时间顺序，共 2 条）：\n用户：帮我改登录接口\n用户：再补一个测试\n\n助手进展（仅供参考，不得作为标题）：\n助手：先看接口实现",
+    "用户消息（按时间顺序，共 2 条）：\n用户：帮我改登录接口\n用户：再补一个测试",
   );
+  assert.ok(!source.includes("先看接口实现"));
   assert.ok(!source.includes("内部推理"));
   assert.ok(!source.includes("工具输出"));
+});
+
+test("buildTitleSource 没有用户消息时才退回最后一条助手消息", () => {
+  const source = buildTitleSource([
+    { role: "assistant", content: "已修复并打包完成，版本 v0.7.7" },
+  ]);
+  assert.match(source, /助手消息（会话里没有用户消息，仅供参考）/);
+  assert.ok(source.includes("已修复并打包完成"));
 });
 
 test("buildTitleSource 对非法输入返回空串", () => {
@@ -124,6 +133,11 @@ test("normalizeGeneratedSuffix 与插件规则一致", () => {
   assert.equal(normalizeGeneratedSuffix("20261016-会话标题"), "会话标题");
   assert.equal(normalizeGeneratedSuffix("超".repeat(40)).length, 30);
   assert.equal(normalizeGeneratedSuffix("   \n  "), "");
+  // 截断到 30 字后的残片（半个括号、「-s」）不能留在标题里。
+  assert.equal(
+    normalizeGeneratedSuffix("我没有读取文件的工具（本会话只挂了上下文管理类工具，没有-s"),
+    "我没有读取文件的工具",
+  );
 });
 
 test("formatTitleDate 使用本地日期，非法输入回退今天", () => {
@@ -169,7 +183,10 @@ test("generateSessionTitle 读对话、调用模型并写回会话名", async ()
   };
   assert.equal(modelBody.max_tokens, 256);
   assert.match(modelBody.messages[0].content, /不要复述/);
-  const wrapped = JSON.parse(modelBody.messages[1].content) as { instruction: string; input: string };
+  // 规则同时写进 user 正文（部分网关丢弃 system 角色），标题数据在分隔线之后。
+  assert.match(modelBody.messages[1].content, /不要复述/);
+  const titlePayload = modelBody.messages[1].content.split("\n---\n").pop()!;
+  const wrapped = JSON.parse(titlePayload) as { instruction: string; input: string };
   assert.match(wrapped.instruction, /input data/);
   assert.match(wrapped.input, /会话最初目标：实现自动命名/);
   // 3) 写回会话名
@@ -244,11 +261,12 @@ test("buildTitleSource 单独置顶会话最初目标，忽略空会话占位符
   );
   assert.ok(source.startsWith("会话最初目标：帮我适配 pi-web 0.15 输入框并打包"));
   assert.match(source, /用户消息（按时间顺序，共 1 条）/);
-  assert.match(source, /助手进展（仅供参考，不得作为标题）/);
+  // 助手回复不能进入标题语料，否则「已修复并打包完成」会被照抄成标题。
+  assert.ok(!source.includes("已修复并打包完成"));
   assert.equal(buildTitleSource(undefined, "(no messages)"), "");
 });
 
-test("generateSessionTitle 两次返回助手回复时重试且不写回会话名", async () => {
+test("generateSessionTitle 两次返回助手回复时用首条用户目标做标题", async () => {
   useFakeModels();
   let modelCalls = 0;
   const { result, requests } = await withStubbedFetch(
@@ -281,9 +299,12 @@ test("generateSessionTitle 两次返回助手回复时重试且不写回会话�
   );
 
   assert.equal(modelCalls, 2);
-  assert.equal(result.ok, false);
-  if (!result.ok) assert.match(result.message, /未采用结果/);
-  assert.equal(requests.filter((item) => item.init.method === "PATCH").length, 0);
+  assert.equal(result.ok, true);
+  if (result.ok) assert.equal(result.name, "20261016-帮我改登录接口");
+  const patches = requests.filter((item) => item.init.method === "PATCH");
+  assert.equal(patches.length, 1);
+  // 绝不把助手应答写进会话名。
+  assert.ok(!String(patches[0].init.body).includes("已修复"));
 });
 
 test("generateSessionTitle 拒绝照抄助手回复，第二次给出合格标题后写回", async () => {

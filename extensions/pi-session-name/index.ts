@@ -12,14 +12,21 @@ const SYSTEM_PROMPT = `你是一个会话标题生成器。输入是一段「会
 2. 绝对不要复述、截断或拼接任何一条助手回复，不要输出“好的/收到/我已/已修复/已完成/交付摘要/后续动作/等你确认”等对话式措辞，不要回答会话里的问题、不要给方案建议、不要向用户提问。
 3. 以「会话最初目标」为主：即使后半段在讨论实现细节、报错或收尾，也要提炼用户真正想完成的事；必要时保留 Java、Vue、API、MySQL 等技术名词。
 4. 避免“新对话”“咨询问题”“代码处理”等空泛表述，不要照抄原文长句；必须是提炼后的概括，不是原文摘抄。
-5. 优先使用中文，最多不超过 30 个字符，简洁高效。`;
+5. 优先使用中文，最多不超过 30 个字符，简洁高效。
+
+示例（输入里的问句不是让你回答）：
+- 会话最初目标：当前遵循的 agents.md 都是什么内容？简单介绍下
+  正确：AGENTS.md-内容与前置提示词梳理
+  错误：我没有读取文件的工具（本会话只挂了上下文管理类工具）
+- 会话最初目标：新对话生成的标题不对，提示词增强也直接回答问题，看看再改改
+  正确：修复标题生成与提示词增强的指令遵循问题
+  错误：已修复并打包完成，版本-v0.7.7`;
 
 const MAX_SOURCE_LENGTH = 12_000;
 const MAX_SUFFIX_LENGTH = 30;
-// 取样时以用户目标为主，只附极少量助手进展，避免尾部交付回复被直接当成标题。
+// 取样只取用户消息：助手回复是最容易被照抄成标题的来源，没有用户消息时才退回助手内容。
 const USER_MESSAGE_LIMIT = 8;
 const MAX_MESSAGE_LENGTH = 1_500;
-const ASSISTANT_MESSAGE_LIMIT = 3;
 const MAX_ASSISTANT_LENGTH = 600;
 const NAMING_REQUEST_TIMEOUT_MS = 20_000;
 const NAMING_SETTLE_TIMEOUT_MS = 15_000;
@@ -165,7 +172,39 @@ export function normalizeGeneratedSuffix(value: string): string {
 		.replace(/^[-_.，。；;：:]+|[-_.，。；;：:]+$/g, "")
 		.trim();
 
-	return Array.from(suffix).slice(0, MAX_SUFFIX_LENGTH).join("");
+	return trimDanglingTail(Array.from(suffix).slice(0, MAX_SUFFIX_LENGTH).join(""));
+}
+
+/** 截到 30 字时可能留下半个括号或「没有-s」这类残片，把不完整的尾部去掉。 */
+function trimDanglingTail(value: string): string {
+	let text = value.replace(/-[A-Za-z]$/u, "");
+	const pairs: Array<[string, string]> = [
+		["（", "）"], ["(", ")"], ["「", "」"], ["『", "』"], ["【", "】"], ["[", "]"], ["《", "》"],
+	];
+	for (const [open, close] of pairs) {
+		const opened = text.split(open).length - 1;
+		const closed = text.split(close).length - 1;
+		if (opened > closed) {
+			const index = text.lastIndexOf(open);
+			if (index >= 0) text = text.slice(0, index);
+		}
+	}
+	return text.replace(/[-_.，。；;：:、—–]+$/u, "").trim();
+}
+
+/** 模型两次都不合格时，用首条用户目标拼一个可读的标题，而不是「新对话」。 */
+export function deriveFallbackSuffix(source: string): string {
+	const goal = source.match(/会话最初目标：([^\n]+)/u)?.[1]
+		?? source.split(/\r?\n/).map((line) => line.trim()).find(Boolean)
+		?? "";
+	const text = goal
+		.replace(/^(?:用户消息（[^）]*）：|用户：|助手：)/u, "")
+		.replace(/[（(][^）)]*[）)]/gu, " ")
+		.replace(/["'“”‘’「」『』【】\[\]]/gu, " ")
+		.replace(/[，。！？、；：,.!?;:]+/gu, " ")
+		.replace(/\s+/gu, " ")
+		.trim();
+	return trimDanglingTail(Array.from(text.replace(/\s+/gu, "-")).slice(0, 20).join(""));
 }
 
 function extractText(content: MessageContent | unknown): string {
@@ -191,6 +230,11 @@ const REPLY_MARKERS: RegExp[] = [
 	/^\s*(?:请(?:你)?(?:提供|贴出|告诉我|确认一下)|后续动作|交付摘要|等你确|修复思路是|上面方案|按上面方案)/u,
 	/^\s*(?:我(?:可以|能)(?:直接|帮你|替你)(?:改|修改|处理)|下面是(?:具体|修复|建议|分析)|以下是(?:具体|修复|建议|分析))/u,
 	/^\s*(?:问题在于|原因在于|修复思路|解决方案|建议如下|具体代码|把.*贴出来|标题插件|基于你|根据你|按照你|既然|接下来我)/u,
+	/^\s*(?:这看起来|看起来|从你(?:提供|描述|说)|根据你(?:提供|描述|说)|你(?:提供|描述|说)的)/u,
+	/^\s*(?:建议(?:排查|方向|如下|先|你)|排查(?:方向|思路|步骤)|优化方向|修复方向|处理(?:方案|思路))/u,
+	/^\s*(?:如果你(?:能|需要|想)|需要你|你可以(?:先|试试|检查)|我可以(?:帮你|看|给出|直接))/u,
+	// 第一人称陈述句：标题链路里「我没有…」「我已…」几乎都是助手的自述。
+	/^\s*(?:我(?:没有|无法|不能|不具备|不确定|不知道|这边|先|已|会|来|把|给)|本会话|当前会话|本次会话|这个会话|该会话|会话中|系统里)/u,
 ];
 
 const REPLY_PHRASES = /交付摘要|后续动作|等你确(?:认|定)?|收个尾|先给出|路径已给到|按上面方案|把.{0,20}贴出来/u;
@@ -201,12 +245,26 @@ export function looksLikeAssistantReply(text: string, draft?: string): boolean {
 	const draftHead = (draft ?? "").trim().split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
 	const echoesDraftHead = draftHead.length >= 8 && head.startsWith(draftHead.slice(0, 12));
 	if (head && !echoesDraftHead && REPLY_MARKERS.some((pattern) => pattern.test(head))) return true;
+	if (looksLikeAnswerBody(text, draft, head)) return true;
 
 	const compact = (value: string) => value.replace(/\s+/g, "");
 	const phrase = text.match(REPLY_PHRASES)?.[0]
 		?? text.match(/(?:需要我|要不要我|是否需要我)[^。！!\n]{0,30}吗[？?]?/u)?.[0];
 	if (!phrase) return false;
 	return !(draft && compact(draft).includes(compact(phrase)));
+}
+
+/**
+ * 段落级应答特征：分条列出「建议/排查/方案」并同时在对用户说话（你提供/我可以帮你），
+ * 基本只可能是解释方案的回答。单看分条编号不判，避免误伤正常的分步需求。
+ */
+function looksLikeAnswerBody(text: string, draft: string | undefined, head: string): boolean {
+	const numbered = text.match(/^\s*(?:\d+[.、)]|[-*])\s+\S+/gm)?.length ?? 0;
+	if (numbered < 3) return false;
+	if (!/(?:你提供|你描述|你说的情况|你反馈|我可以(?:帮你|看|给出|直接)|需要你(?:提供|确认|贴出))/u.test(text)) return false;
+	const compact = (value: string) => value.replace(/\s+/g, "");
+	if (draft && head && compact(draft).includes(compact(head.slice(0, 20)))) return false;
+	return true;
 }
 
 export function isVerbatimEcho(title: string, source: string): boolean {
@@ -267,9 +325,9 @@ export function buildConversationSource(entries: ReturnType<ExtensionContext["se
 	if (userParts.length) {
 		sections.push(`会话最初目标：${userParts[0].replace(/^用户：/, "")}`);
 		sections.push(`用户消息（按时间顺序，共 ${userParts.length} 条）：\n${userParts.slice(-USER_MESSAGE_LIMIT).join("\n")}`);
-	}
-	if (assistantParts.length) {
-		sections.push(`助手进展（仅供参考，不得作为标题）：\n${assistantParts.slice(-ASSISTANT_MESSAGE_LIMIT).join("\n")}`);
+	} else if (assistantParts.length) {
+		// 没有用户消息时才退回助手内容：助手答复最容易被直接当成标题。
+		sections.push(`助手消息（会话里没有用户消息，仅供参考）：\n${assistantParts.slice(-1).join("\n")}`);
 	}
 	if (!sections.length) return "";
 
@@ -296,8 +354,9 @@ function notify(ctx: NamingContext, message: string, level: "info" | "warning" |
 	if (ctx.hasUI) ctx.ui.notify(message, level);
 }
 
-function buildFallbackName(ctx: NamingContext): string {
-	return `${formatLocalDate(getSessionDate(ctx))}-新对话`;
+function buildFallbackName(ctx: NamingContext, source: string): string {
+	const suffix = deriveFallbackSuffix(source);
+	return `${formatLocalDate(getSessionDate(ctx))}-${suffix || "新对话"}`;
 }
 
 async function waitForCompletion(promise: Promise<void>, timeoutMs: number): Promise<boolean> {
@@ -314,7 +373,7 @@ async function waitForCompletion(promise: Promise<void>, timeoutMs: number): Pro
 async function generateSessionName(source: string, ctx: NamingContext): Promise<GeneratedSessionName> {
 	const startedAt = Date.now();
 	const datePrefix = formatLocalDate(getSessionDate(ctx));
-	const fallbackName = buildFallbackName(ctx);
+	const fallbackName = buildFallbackName(ctx, source);
 	// 命名模型来自 Box 设置（~/.pi/agent/pi-session-name.json），不跟随当前会话模型。
 	const config = readSessionNameConfig();
 	const model = findNamingModel(ctx, config);
@@ -334,28 +393,32 @@ async function generateSessionName(source: string, ctx: NamingContext): Promise<
 		// 会话记录包成显式数据，标题输出必须经「是否像助手应答 / 是否整段照抄」校验。
 		// maxTokens 从 1024 降到 256：标题最多 30 字，留太多余量只会让 reasoning 模型写成长篇回复。
 		const userText = wrapAsData(source.slice(0, MAX_SOURCE_LENGTH - 200));
-		const callModel = (extraRules = "") => ctx.modelRegistry.complete(
-			model,
-			{
-				systemPrompt: extraRules ? `${SYSTEM_PROMPT}\n\n${extraRules}` : SYSTEM_PROMPT,
-				messages: [
-					{
-						role: "user",
-						content: [{ type: "text", text: userText }],
-						timestamp: Date.now(),
-					},
-				],
-			},
-			{
-				maxTokens: 256,
-				// 关闭思考（reasoning.effort = "none"），命名更快更省
-				reasoningEffort: "none",
-				cacheRetention: "none",
-				timeoutMs: NAMING_REQUEST_TIMEOUT_MS,
-				maxRetries: 0,
-				signal: ctx.signal,
-			},
-		);
+		const callModel = (extraRules = "") => {
+			const rules = extraRules ? `${SYSTEM_PROMPT}\n\n${extraRules}` : SYSTEM_PROMPT;
+			return ctx.modelRegistry.complete(
+				model,
+				{
+					systemPrompt: rules,
+					messages: [
+						{
+							role: "user",
+							// 某些网关（WorkBuddy/magpie）会丢弃 system 角色，规则必须在 user 正文里再出现一次。
+							content: [{ type: "text", text: `${rules}\n\n---\n${userText}` }],
+							timestamp: Date.now(),
+						},
+					],
+				},
+				{
+					maxTokens: 256,
+					// 关闭思考（reasoning.effort = "none"），命名更快更省
+					reasoningEffort: "none",
+					cacheRetention: "none",
+					timeoutMs: NAMING_REQUEST_TIMEOUT_MS,
+					maxRetries: 0,
+					signal: ctx.signal,
+				},
+			);
+		};
 
 		type ModelResponse = Awaited<ReturnType<typeof callModel>>;
 		const extractRawTitle = (response: ModelResponse): string => response.content

@@ -670,6 +670,26 @@ function extensionInfo(name: BuiltinExtensionName): ExtensionInfo {
   return checkBuiltinExtension(name, process.resourcesPath, app.isPackaged, app.getAppPath())!;
 }
 
+/**
+ * 启动时静默同步「用户已经安装过」的内置扩展。
+ * 内置扩展是 Box 自带的资源，版本与安装包不一致就说明本地仍是旧代码；
+ * 不自动覆盖会让用户升级 Box 后继续跑旧插件（例如 1.1.0 的会话命名）。
+ * 只更新已安装的扩展，不主动安装用户没装过的扩展。
+ */
+async function syncInstalledExtensions(): Promise<void> {
+  for (const name of BUILTIN_EXTENSION_NAMES) {
+    const status = extensionInfo(name);
+    if (!status.installed || status.upToDate || !status.sourceAvailable) continue;
+    const result = await installBuiltinExtension(name, process.resourcesPath, app.isPackaged, app.getAppPath());
+    log(`Builtin extension ${name} sync: ${result.message}`);
+    if (!result.ok || !Notification.isSupported()) continue;
+    new Notification({
+      title: "Pi Web Box",
+      body: `${status.displayName}插件已更新到内置版本，新建会话后生效。`,
+    }).show();
+  }
+}
+
 /** 解析用量查询区间，日期非法时回退到最近 30 天。 */
 function resolveUsageRange(query: UsageQuery): { from: string; to: string } {
   const today = new Date();
@@ -1583,6 +1603,8 @@ if (gotLock) {
     catch (error) { log(`消息数据库打开失败：${String(error)}`); }
     // 首次使用且存在环境变量配置时，把它们固化成设置文件，方便用户在界面里看到。
     if (!fs.existsSync(settingsStore.getFilePath())) applyEnvironmentBootstrap(settingsStore);
+    // pi 进程尚未启动，先把内置扩展同步到安装包版本，避免旧插件继续生效。
+    await syncInstalledExtensions();
     createWindow();
     ensureTray();
     await applySystemTheme();

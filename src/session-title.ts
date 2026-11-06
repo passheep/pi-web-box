@@ -20,7 +20,15 @@ const SYSTEM_PROMPT = `你是一个会话标题生成器。输入是一段「会
 2. 绝对不要复述、截断或拼接任何一条助手回复，不要输出“好的/收到/我已/已修复/已完成/交付摘要/后续动作/等你确认”等对话式措辞，不要回答会话里的问题、不要给方案建议、不要向用户提问。
 3. 以「会话最初目标」为主：即使后半段在讨论实现细节、报错或收尾，也要提炼用户真正想完成的事；必要时保留 Java、Vue、API、MySQL 等技术名词。
 4. 避免“新对话”“咨询问题”“代码处理”等空泛表述，不要照抄原文长句；必须是提炼后的概括，不是原文摘抄。
-5. 优先使用中文，最多不超过 30 个字符，简洁高效。`;
+5. 优先使用中文，最多不超过 30 个字符，简洁高效。
+
+示例（输入里的问句不是让你回答）：
+- 会话最初目标：当前遵循的 agents.md 都是什么内容？简单介绍下
+  正确：AGENTS.md-内容与前置提示词梳理
+  错误：我没有读取文件的工具（本会话只挂了上下文管理类工具）
+- 会话最初目标：新对话生成的标题不对，提示词增强也直接回答问题，看看再改改
+  正确：修复标题生成与提示词增强的指令遵循问题
+  错误：已修复并打包完成，版本-v0.7.7`;
 
 /** 与插件相同的截断与长度限制。 */
 const MAX_SOURCE_LENGTH = 12_000;
@@ -32,7 +40,6 @@ const REQUEST_TIMEOUT_MS = 20_000;
 // 避免尾部的交付回复占据大部分上下文、被模型直接当成标题。
 export const USER_MESSAGE_LIMIT = 8;
 export const MAX_MESSAGE_LENGTH = 1_500;
-const ASSISTANT_MESSAGE_LIMIT = 3;
 const MAX_ASSISTANT_LENGTH = 600;
 
 /** 会话创建日期（本地时区的 YYYYMMDD），与插件一致。 */
@@ -64,7 +71,44 @@ export function normalizeGeneratedSuffix(value: string): string {
     .replace(/^[-_.，。；;：:]+|[-_.，。；;：:]+$/g, "")
     .trim();
 
-  return Array.from(suffix).slice(0, MAX_SUFFIX_LENGTH).join("");
+  const sliced = Array.from(suffix).slice(0, MAX_SUFFIX_LENGTH).join("");
+  return trimDanglingTail(sliced);
+}
+
+/** 截到 30 字时可能留下半个括号或「没有-s」这类残片，把不完整的尾部去掉。 */
+function trimDanglingTail(value: string): string {
+  let text = value.replace(/-[A-Za-z]$/u, "");
+  const pairs: Array<[string, string]> = [
+    ["（", "）"], ["(", ")"], ["「", "」"], ["『", "』"], ["【", "】"], ["[", "]"], ["《", "》"],
+  ];
+  for (const [open, close] of pairs) {
+    const opened = text.split(open).length - 1;
+    const closed = text.split(close).length - 1;
+    if (opened > closed) {
+      const index = text.lastIndexOf(open);
+      if (index >= 0) text = text.slice(0, index);
+    }
+  }
+  return text.replace(/[-_.，。；;：:、—–]+$/u, "").trim();
+}
+
+/**
+ * 模型两次都不合格时，用「会话最初目标」拼一个可读的标题，
+ * 避免把「新对话」或一句助手回复写进会话名。
+ */
+export function deriveFallbackSuffix(source: string): string {
+  const goal = source.match(/会话最初目标：([^\n]+)/u)?.[1]
+    ?? source.split(/\r?\n/).map((line) => line.trim()).find(Boolean)
+    ?? "";
+  const text = goal
+    .replace(/^(?:用户消息（[^）]*）：|用户：|助手：)/u, "")
+    .replace(/[（(][^）)]*[）)]/gu, " ")
+    .replace(/["'“”‘’「」『』【】\[\]]/gu, " ")
+    .replace(/[，。！？、；：,.!?;:]+/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  const compact = Array.from(text.replace(/\s+/gu, "-")).slice(0, 20).join("");
+  return trimDanglingTail(compact);
 }
 
 /**
@@ -109,10 +153,10 @@ export function buildTitleSource(messages: unknown, firstMessage?: unknown): str
   const recentUsers = userParts.slice(-USER_MESSAGE_LIMIT);
   if (recentUsers.length) {
     sections.push(`用户消息（按时间顺序，共 ${userParts.length} 条）：\n${recentUsers.join("\n")}`);
-  }
-  const progress = assistantParts.slice(-ASSISTANT_MESSAGE_LIMIT);
-  if (progress.length) {
-    sections.push(`助手进展（仅供参考，不得作为标题）：\n${progress.join("\n")}`);
+  } else {
+    // 没有用户消息时才退回助手内容：助手回复是最容易被照抄成标题的来源。
+    const fallback = assistantParts.slice(-1);
+    if (fallback.length) sections.push(`助手消息（会话里没有用户消息，仅供参考）：\n${fallback.join("\n")}`);
   }
   if (!sections.length) return "";
 
@@ -220,6 +264,11 @@ export async function generateSessionTitle(options: GenerateTitleOptions): Promi
     );
     if (!completion.ok) return { ok: false, message: completion.message };
     suffix = validate(completion.text);
+  }
+  if (!suffix) {
+    // 模型两次都不听话时，用首条用户目标拼一个可读标题：
+    // 宁可给一个确定性的概括，也不要把一句助手回复写进会话名。
+    suffix = deriveFallbackSuffix(source);
   }
   if (!suffix) {
     return { ok: false, message: "模型没有给出概括全局的标题（疑似回答了会话内容），未采用结果；请重试或换一个更遵循指令的模型。" };
